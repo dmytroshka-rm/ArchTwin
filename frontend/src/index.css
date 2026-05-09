@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --canvas-bg: #0f1117;
+    --canvas-surface: #1a1d27;
+    --canvas-border: #2d3148;
+    --canvas-accent: #4f6ef7;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    background-color: var(--canvas-bg);
+    color: #e2e8f0;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--canvas-surface);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--canvas-border);
+    border-radius: 3px;
+  }
+}
+
+/* React Flow overrides */
+.react-flow__background {
+  background-color: var(--canvas-bg) !important;
+}
+
+.react-flow__controls {
+  background: var(--canvas-surface);
+  border: 1px solid var(--canvas-border);
+  border-radius: 8px;
+}
+
+.react-flow__controls-button {
+  background: var(--canvas-surface) !important;
+  border-bottom-color: var(--canvas-border) !important;
+  color: #94a3b8 !important;
+}
+
+.react-flow__minimap {
+  background: var(--canvas-surface) !important;
+  border: 1px solid var(--canvas-border);
+  border-radius: 8px;
+}

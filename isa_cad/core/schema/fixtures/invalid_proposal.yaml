@@ -1,0 +1,22 @@
+# This file intentionally contains schema violations for testing
+design_proposals:
+  - id: ""                          # minLength violation
+    title: "Bad proposal"
+    status: "unknown_status"        # enum violation
+    optimization_goal: "cost"       # enum violation (must be 'cost_efficiency')
+    baseline_ref: "baseline.prod"
+    simulation_fidelity:
+      base_confidence: 1.5          # maximum: 1.0 violation
+      data_freshness_score: 0.9
+      adjusted_confidence: 0.9
+    non_linear_scoring:
+      veto_gates:
+        security_gate: 0.3          # enum [0.0, 0.5, 1.0] violation
+    blast_radius:
+      impacted_stable_components:
+        - id: "comp.db"
+          tier: "tier_2"            # enum violation
+          distance: 0               # minimum: 1 violation
+          criticality_multiplier: 3.0  # enum [0.5, 1.0, 2.0] violation
+          impact_score: 2.0
+          risk: "risk"

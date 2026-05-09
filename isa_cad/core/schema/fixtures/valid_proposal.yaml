@@ -1,0 +1,107 @@
+design_proposals:
+  - id: "proposal.layer-a-serverless"
+    title: "Replace Orders API ECS service with Serverless design"
+    status: "sandbox_layer"
+    optimization_goal: "cost_efficiency"
+    baseline_ref: "architecture.baseline.prod"
+    canvas_session_id: "canvas.session.2026-05-08-001"
+    comparison:
+      baseline_ref: "architecture.baseline.prod"
+      compare_against:
+        - "proposal.layer-b-managed-ecs"
+      differential_mode: "baseline_to_layer"
+    simulation_fidelity:
+      base_confidence: 0.82
+      data_freshness_score: 0.95
+      confidence_penalty: 0.00
+      adjusted_confidence: 0.82
+      data_age:
+        cloud_inventory: "2h"
+        runtime_metrics: "5m"
+        pricing_data: "1d"
+      output_mode: "final_forecast"
+      require_observed_graph_refresh: false
+    calibration:
+      enabled_for_existing_system: true
+      historical_error_delta:
+        cost: 0.24
+        latency: 0.18
+      safety_buffer:
+        applied: true
+        reason: "historical cost forecast delta exceeded 20%"
+        cost_multiplier: 1.15
+        latency_multiplier: 1.00
+        bias_note: "Cost estimate includes +15% safety buffer."
+    non_linear_scoring:
+      recommendation_score: 0.74
+      optimization_weights:
+        cost: 0.45
+        performance: 0.20
+        reliability: 0.15
+        security: 0.20
+      veto_gates:
+        security_gate: 1.0
+        reliability_gate: 1.0
+        compliance_gate: 1.0
+        fidelity_gate: 1.0
+    parallel_reviews:
+      cost:
+        monthly_current_usd: 1200
+        monthly_projected_usd: 850
+        egress_monthly_usd: 110
+        cache_hit_ratio: 0.85
+        cache_hit_ratio_source: "heuristic_cdn_default"
+        assumptions:
+          - "CDN CHR default used because real cache metrics are unavailable"
+        status: "pass"
+        confidence: 0.80
+      performance:
+        latency_delta: "p95 may increase during cold starts"
+        bottleneck_risk: "medium"
+        status: "warning"
+        confidence: 0.75
+      security:
+        status: "warning"
+        pii_flow_status: "pass"
+        data_residency_status: "pass"
+        compliance_status: "pass"
+        confidence: 0.90
+    blast_radius:
+      source_component_id: "component.orders-api"
+      max_traversal_depth: 3
+      impacted_stable_components:
+        - id: "component.postgresql.shared-db"
+          tier: "tier_1"
+          distance: 1
+          criticality_multiplier: 2.0
+          impact_score: 2.0
+          risk: "potential_io_bottleneck"
+          mitigations:
+            - "connection pooling proxy"
+            - "validate peak write TPS"
+            - "set Lambda reserved concurrency"
+        - id: "component.identity-provider.auth0"
+          tier: "tier_1"
+          distance: 2
+          criticality_multiplier: 2.0
+          impact_score: 1.0
+          risk: "auth_latency_amplification"
+          mitigations:
+            - "cache token introspection"
+            - "define fallback policy"
+    checkpointing:
+      checkpoint_required: false
+      checkpoint_id: null
+      resume_node: null
+    required_actions:
+      developer:
+        - "Set concurrency cap and update IaC patch."
+        - "Update IaC patch for runtime and scaling limits."
+      architect:
+        - "Review ADR for topology/runtime change."
+        - "Decide whether to promote sandbox layer to candidate_for_review."
+      security_ops:
+        - "Validate IAM scope, public exposure, PII flow and Data Residency."
+        - "Configure alerts for DB connections, egress and latency."
+      data_fidelity:
+        - "Refresh Observed Graph if adjusted_confidence < 0.65 or data_age > 7d."

@@ -1,0 +1,266 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "isa-cad/isa.yaml",
+  "title": "ISA-CAD isa.yaml Schema v0.5.3",
+  "type": "object",
+  "required": ["design_proposals"],
+  "additionalProperties": false,
+  "properties": {
+    "design_proposals": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/DesignProposal" }
+    }
+  },
+
+  "definitions": {
+
+    "DesignProposal": {
+      "type": "object",
+      "required": ["id", "title", "status", "optimization_goal", "baseline_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "id":                 { "type": "string", "minLength": 1 },
+        "title":              { "type": "string", "minLength": 1 },
+        "status":             { "$ref": "#/definitions/ProposalStatus" },
+        "optimization_goal":  { "$ref": "#/definitions/OptimizationGoal" },
+        "canvas_session_id":  { "type": ["string", "null"] },
+        "comparison": {
+          "type": "object",
+          "required": ["baseline_ref"],
+          "additionalProperties": false,
+          "properties": {
+            "baseline_ref":      { "type": "string" },
+            "compare_against":   { "type": "array", "items": { "type": "string" } },
+            "differential_mode": { "$ref": "#/definitions/ComparisonMode" }
+          }
+        },
+        "baseline_ref": { "type": "string" },
+        "simulation_fidelity": { "$ref": "#/definitions/SimulationFidelity" },
+        "calibration":         { "$ref": "#/definitions/Calibration" },
+        "non_linear_scoring":  { "$ref": "#/definitions/NonLinearScoring" },
+        "parallel_reviews":    { "$ref": "#/definitions/ParallelReviews" },
+        "blast_radius":        { "$ref": "#/definitions/BlastRadius" },
+        "checkpointing":       { "$ref": "#/definitions/Checkpointing" },
+        "required_actions":    { "$ref": "#/definitions/RequiredActions" }
+      }
+    },
+
+    "ProposalStatus": {
+      "type": "string",
+      "enum": ["sandbox_layer", "candidate_for_review", "blocked", "approved", "rejected"]
+    },
+
+    "OptimizationGoal": {
+      "type": "string",
+      "enum": ["cost_efficiency", "max_reliability", "minimal_complexity", "balanced"]
+    },
+
+    "ComparisonMode": {
+      "type": "string",
+      "enum": ["baseline_to_layer", "layer_to_layer", "overlay_analysis"]
+    },
+
+    "OutputMode": {
+      "type": "string",
+      "enum": ["final_forecast", "exploratory_estimate"]
+    },
+
+    "SimulationFidelity": {
+      "type": "object",
+      "required": ["base_confidence", "data_freshness_score", "adjusted_confidence"],
+      "additionalProperties": false,
+      "properties": {
+        "base_confidence":              { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "data_freshness_score":         { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "confidence_penalty":           { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "adjusted_confidence":          { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "data_age":                     { "$ref": "#/definitions/DataAge" },
+        "output_mode":                  { "$ref": "#/definitions/OutputMode" },
+        "require_observed_graph_refresh": { "type": "boolean" }
+      }
+    },
+
+    "DataAge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cloud_inventory":  { "type": "string" },
+        "runtime_metrics":  { "type": "string" },
+        "pricing_data":     { "type": "string" },
+        "calibration_data": { "type": "string" }
+      }
+    },
+
+    "Calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled_for_existing_system": { "type": "boolean" },
+        "historical_error_delta": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cost":    { "type": "number", "minimum": 0.0 },
+            "latency": { "type": "number", "minimum": 0.0 }
+          }
+        },
+        "safety_buffer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "applied":            { "type": "boolean" },
+            "reason":             { "type": ["string", "null"] },
+            "cost_multiplier":    { "type": "number", "minimum": 1.0 },
+            "latency_multiplier": { "type": "number", "minimum": 1.0 },
+            "bias_note":          { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+
+    "NonLinearScoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "recommendation_score": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "optimization_weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cost":        { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "performance": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "reliability": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "security":    { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+          }
+        },
+        "veto_gates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "security_gate":    { "type": "number", "enum": [0.0, 0.5, 1.0] },
+            "reliability_gate": { "type": "number", "enum": [0.0, 0.5, 1.0] },
+            "compliance_gate":  { "type": "number", "enum": [0.0, 0.5, 1.0] },
+            "fidelity_gate":    { "type": "number", "enum": [0.0, 0.5, 1.0] }
+          }
+        }
+      }
+    },
+
+    "ParallelReviews": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cost":        { "$ref": "#/definitions/CostReview" },
+        "performance": { "$ref": "#/definitions/PerformanceReview" },
+        "security":    { "$ref": "#/definitions/SecurityReview" }
+      }
+    },
+
+    "CostReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "monthly_current_usd":     { "type": "number", "minimum": 0 },
+        "monthly_projected_usd":   { "type": "number", "minimum": 0 },
+        "egress_monthly_usd":      { "type": "number", "minimum": 0 },
+        "cache_hit_ratio":         { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "cache_hit_ratio_source":  { "type": "string" },
+        "inter_region_cost_usd":   { "type": "number", "minimum": 0 },
+        "request_fees_usd":        { "type": "number", "minimum": 0 },
+        "assumptions":             { "type": "array", "items": { "type": "string" } },
+        "status":                  { "$ref": "#/definitions/ReviewerStatus" },
+        "confidence":              { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+      }
+    },
+
+    "PerformanceReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "latency_delta":     { "type": "string" },
+        "p95_baseline_ms":   { "type": "number", "minimum": 0 },
+        "p95_projected_ms":  { "type": "number", "minimum": 0 },
+        "p99_baseline_ms":   { "type": "number", "minimum": 0 },
+        "p99_projected_ms":  { "type": "number", "minimum": 0 },
+        "bottleneck_risk":   { "type": "string", "enum": ["low", "medium", "high"] },
+        "cold_start_risk":   { "type": "string" },
+        "db_pressure_risk":  { "type": "string" },
+        "status":            { "$ref": "#/definitions/ReviewerStatus" },
+        "confidence":        { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+      }
+    },
+
+    "SecurityReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status":                { "$ref": "#/definitions/ReviewerStatus" },
+        "public_exposure_risk":  { "type": "string" },
+        "iam_scope_risk":        { "type": "string" },
+        "pii_flow_status":       { "type": "string", "enum": ["pass", "fail", "warning", "unknown"] },
+        "data_residency_status": { "type": "string", "enum": ["pass", "fail", "warning", "unknown"] },
+        "compliance_status":     { "type": "string", "enum": ["pass", "fail", "warning", "unknown"] },
+        "confidence":            { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+      }
+    },
+
+    "ReviewerStatus": {
+      "type": "string",
+      "enum": ["pass", "warning", "fail", "unknown"]
+    },
+
+    "BlastRadius": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_component_id":        { "type": "string" },
+        "max_traversal_depth":        { "type": "integer", "minimum": 1 },
+        "impacted_stable_components": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ImpactedComponent" }
+        },
+        "total_impact_score":         { "type": "number", "minimum": 0.0 },
+        "summary":                    { "type": "string" }
+      }
+    },
+
+    "ImpactedComponent": {
+      "type": "object",
+      "required": ["id", "tier", "distance", "criticality_multiplier", "impact_score", "risk"],
+      "additionalProperties": false,
+      "properties": {
+        "id":                     { "type": "string" },
+        "tier":                   { "type": "string", "enum": ["tier_1", "standard", "auxiliary"] },
+        "distance":               { "type": "integer", "minimum": 1 },
+        "criticality_multiplier": { "type": "number", "enum": [0.5, 1.0, 2.0] },
+        "impact_score":           { "type": "number", "minimum": 0.0 },
+        "risk":                   { "type": "string" },
+        "mitigations":            { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "Checkpointing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_required": { "type": "boolean" },
+        "checkpoint_id":       { "type": ["string", "null"] },
+        "resume_node":         { "type": ["string", "null"] },
+        "saved_at":            { "type": ["string", "null"], "format": "date-time" },
+        "pending_action":      { "type": "string" }
+      }
+    },
+
+    "RequiredActions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "developer":     { "type": "array", "items": { "type": "string" } },
+        "architect":     { "type": "array", "items": { "type": "string" } },
+        "security_ops":  { "type": "array", "items": { "type": "string" } },
+        "data_fidelity": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
