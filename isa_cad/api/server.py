@@ -14,6 +14,7 @@ Golden rule (Convention v0.6 Section 1.1):
 """
 
 import asyncio
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -44,9 +45,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+def _cors_allow_origins() -> list[str]:
+    raw = os.getenv("ISA_CAD_CORS_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return ["http://localhost:5173"]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite dev server
+    allow_origins=_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

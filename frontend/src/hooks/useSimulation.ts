@@ -4,6 +4,7 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react'
+import { resolveApiUrl } from '@/api/client'
 import { simulationApi } from '@/api/endpoints'
 import { useSimulationStore } from '@/store/simulationStore'
 import type { SimulationRequest, SimulationEvent } from '@/generated/simulation-result.types'
@@ -41,7 +42,7 @@ export function useSimulation() {
 
       // Open SSE stream for real-time events
       closeStream()
-      const es = new EventSource(`/api/simulations/${job_id}/stream`)
+      const es = new EventSource(resolveApiUrl(`/api/simulations/${job_id}/stream`))
       eventSourceRef.current = es
 
       es.addEventListener('message', (e: MessageEvent) => {

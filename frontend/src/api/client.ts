@@ -4,6 +4,15 @@
  * or compliance logic itself (Convention v0.6 Section 2.2 / 7.1).
  */
 
+/** Same-origin in dev (Vite proxy); set VITE_API_ORIGIN in production (e.g. https://api.example.com). */
+const API_ORIGIN = (import.meta.env.VITE_API_ORIGIN as string | undefined)?.replace(/\/$/, '') ?? ''
+
+/** Full URL for paths starting with `/api` (REST + SSE). */
+export function resolveApiUrl(apiPath: string): string {
+  if (!API_ORIGIN) return apiPath
+  return `${API_ORIGIN}${apiPath}`
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -20,7 +29,7 @@ async function request<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(resolveApiUrl(`/api${path}`), {
     method,
     headers: {
       'Content-Type': 'application/json',
