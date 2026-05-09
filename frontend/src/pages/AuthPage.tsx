@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { formatAuthError } from '@/lib/authErrors'
 import { useAuth } from '@/lib/useAuth'
 import clsx from 'clsx'
 
@@ -37,13 +38,7 @@ export function AuthPage({ mode }: Props) {
       }
       navigate('/canvas')
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Authentication failed'
-      // Clean up Firebase error messages
-      const clean = msg
-        .replace('Firebase: ', '')
-        .replace(/\(auth\/.*\)/, '')
-        .trim()
-      setLocalError(clean)
+      setLocalError(formatAuthError(err))
     } finally {
       setLoading(false)
     }
@@ -56,14 +51,13 @@ export function AuthPage({ mode }: Props) {
       await signInWithGoogle()
       navigate('/canvas')
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Google auth failed'
-      setLocalError(msg.replace('Firebase: ', '').replace(/\(auth\/.*\)/, '').trim())
+      setLocalError(formatAuthError(err))
     } finally {
       setLoading(false)
     }
   }
 
-  const displayError = localError || error
+  const displayError = localError ?? (error ? formatAuthError(new Error(error)) : null)
 
   return (
     <div className="min-h-screen bg-canvas-bg flex items-center justify-center px-4">
