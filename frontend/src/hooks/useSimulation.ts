@@ -134,7 +134,13 @@ export function useVersionHandshake() {
         : `Backend convention v${caps.agent_convention_version} is below required v${REQUIRED_AGENT_VERSION}. Editing disabled.`
       setCompatibility(compatible, warning)
     }).catch(() => {
-      setCompatibility(false, 'Could not reach backend. Check API server.')
+      const noApiOrigin =
+        import.meta.env.PROD &&
+        !String(import.meta.env.VITE_API_ORIGIN ?? '').trim()
+      const msg = noApiOrigin
+        ? 'Could not reach backend: production build has no VITE_API_ORIGIN. In Vercel → Environment Variables add VITE_API_ORIGIN=https://YOUR-RAILWAY-URL.up.railway.app (no trailing slash), then Redeploy.'
+        : 'Could not reach backend: check Railway is running (/api/health), ISA_CAD_CORS_ORIGINS includes this site, and VITE_API_ORIGIN matches your API URL.'
+      setCompatibility(false, msg)
     })
   }, [setCompatibility])
 }
