@@ -9,7 +9,7 @@ interface Props {
 }
 
 export function AuthPage({ mode }: Props) {
-  const { signIn, signUp, signInWithGoogle, error } = useAuth()
+  const { signIn, signUp, signInWithGoogle, error, resendVerification } = useAuth()
   const navigate = useNavigate()
 
   const [email, setEmail] = useState('')
@@ -17,6 +17,7 @@ export function AuthPage({ mode }: Props) {
   const [name, setName] = useState('')
   const [loading, setLoading] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
+  const [verificationSent, setVerificationSent] = useState(false)
 
   const isRegister = mode === 'register'
 
@@ -33,6 +34,7 @@ export function AuthPage({ mode }: Props) {
           return
         }
         await signUp(email, password, name)
+        setVerificationSent(true)
       } else {
         await signIn(email, password)
       }
@@ -74,6 +76,21 @@ export function AuthPage({ mode }: Props) {
             {isRegister ? 'Start designing your architecture' : 'Welcome back'}
           </p>
         </div>
+
+        {/* Verification sent notice */}
+        {verificationSent && (
+          <div className="bg-status-pass/10 border border-status-pass/30 rounded-xl p-4 mb-4 text-center">
+            <div className="text-status-pass text-sm font-medium mb-1">Verification email sent!</div>
+            <p className="text-[11px] text-slate-400 mb-2">Check your inbox and click the link to verify your account.</p>
+            <button
+              type="button"
+              onClick={async () => { await resendVerification(); setLocalError(null) }}
+              className="text-[11px] text-canvas-accent hover:underline"
+            >
+              Resend verification email
+            </button>
+          </div>
+        )}
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="bg-canvas-surface border border-canvas-border rounded-xl p-6 flex flex-col gap-4">

@@ -27,6 +27,8 @@ export interface SimulationRequest {
   include_blast_radius: boolean
   include_calibration: boolean
   freshness_policy?: FreshnessPolicy
+  components?: Array<Record<string, unknown>>
+  relations?: Array<Record<string, unknown>>
 }
 
 // ── Veto gates ────────────────────────────────────────────────────────────

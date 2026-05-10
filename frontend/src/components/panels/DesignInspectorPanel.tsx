@@ -5,150 +5,122 @@
  */
 
 import { useCallback, useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { useCanvasStore } from '@/store/canvasStore'
 import { useSandboxStore } from '@/store/sandboxStore'
-import { canvasApi } from '@/api/endpoints'
-import { nanoid } from '@/components/canvas/nanoid'
-import type { ArchComponent } from '@/generated/isa.types'
-import type { CanvasOperationStatus } from '@/generated/canvas-operation.types'
+import type { ArchComponent, ArchRelation } from '@/generated/isa.types'
 
 interface Props {
   layerId: string | null
   editingBlocked: boolean
 }
 
+const COMPONENT_TYPES = ['service', 'data_store', 'cache', 'queue', 'gateway', 'external_system'] as const
+const TIERS = ['tier_1', 'standard', 'auxiliary'] as const
+const DATA_CLASSES = ['public', 'internal', 'confidential', 'restricted'] as const
+const RELATION_TYPES = ['synchronous', 'asynchronous', 'data_access', 'streaming', 'batch'] as const
+const PROTOCOLS = ['HTTPS', 'gRPC', 'PostgreSQL', 'Redis', 'SQS', 'Kafka', 'WebSocket', 'TCP'] as const
+
 export function DesignInspectorPanel({ layerId, editingBlocked }: Props) {
-  const { selectedNodeIds, addPendingOp, resolvePendingOp, clearSelection } = useCanvasStore()
-  const { getComponent, upsertComponent, removeComponent } = useSandboxStore()
+  const { selectedNodeIds, selectedEdgeIds } = useCanvasStore()
+  const { getComponent } = useSandboxStore()
 
-  const selectedId = selectedNodeIds[0] ?? null
-  const component  = layerId && selectedId ? getComponent(layerId, selectedId) : null
+  const selectedNodeId = selectedNodeIds[0] ?? null
+  const selectedEdgeId = selectedEdgeIds[0] ?? null
+  const component = layerId && selectedNodeId ? getComponent(layerId, selectedNodeId) : null
 
-  const [editedName, setEditedName]   = useState<string | null>(null)
-  const [editedTech, setEditedTech]   = useState<string | null>(null)
-  const [validationMsg, setValidMsg]  = useState<string | null>(null)
-  const [validationStatus, setVStatus] = useState<CanvasOperationStatus | null>(null)
+  // Find selected relation
+  const layer = layerId ? useSandboxStore.getState().getLayer(layerId) : undefined
+  const relation = selectedEdgeId ? layer?.relations.find((r) => r.id === selectedEdgeId) : null
 
-  const updateMutation = useMutation({
-    mutationFn: async (patch: Partial<ArchComponent>) => {
-      if (!layerId || !component) throw new Error('No active layer or component')
-      const opId = nanoid()
-      addPendingOp({
-        id:         opId,
-        type:       'update_component',
-        status:     'pending_validation',
-        created_at: new Date().toISOString(),
-        payload:    { component_id: component.id, layer_id: layerId, patch },
-      })
-      const result = await canvasApi.validateOperation({
-        type:    'update_component',
-        payload: { component_id: component.id, layer_id: layerId, patch },
-      })
-      resolvePendingOp(opId, result.status, result.warnings.join('; '))
-      return result
-    },
-    onSuccess: (result) => {
-      setVStatus(result.status)
-      setValidMsg(result.warnings.join(' ') || null)
-      if (result.status === 'valid' && result.normalized && layerId) {
-        upsertComponent(layerId, result.normalized as ArchComponent)
-      }
-    },
-    onError: () => {
-      setVStatus('invalid')
-      setValidMsg('Backend validation failed')
-    },
-  })
-
-  const commitEdit = useCallback(() => {
-    if (!component || editingBlocked) return
-    const patch: Partial<ArchComponent> = {}
-    if (editedName !== null)  patch.name       = editedName
-    if (editedTech !== null)  patch.technology  = editedTech
-    if (Object.keys(patch).length > 0) {
-      updateMutation.mutate(patch)
-    }
-    setEditedName(null)
-    setEditedTech(null)
-  }, [component, editedName, editedTech, editingBlocked, updateMutation])
-
-  const handleDelete = useCallback(() => {
-    if (!layerId || !component || editingBlocked) return
-    removeComponent(layerId, component.id)
-    clearSelection()
-  }, [layerId, component, editingBlocked, removeComponent, clearSelection])
-
-  if (!component) {
+  if (!component && !relation) {
     return (
       <div className="flex-1 flex items-center justify-center text-slate-600 text-xs p-4 text-center">
-        Select a component on the canvas to inspect
+        <div>
+          <div className="text-lg mb-2 opacity-50">⬡</div>
+          Select a component or edge<br />on the canvas to inspect and edit
+        </div>
       </div>
     )
   }
 
+  if (relation && layerId) {
+    return <RelationInspector relation={relation} layerId={layerId} editingBlocked={editingBlocked} />
+  }
+
+  if (component && layerId) {
+    return <ComponentInspector component={component} layerId={layerId} editingBlocked={editingBlocked} />
+  }
+
+  return null
+}
+
+// ── Component Inspector ───────────────────────────────────────────────────────
+
+function ComponentInspector({ component, layerId, editingBlocked }: {
+  component: ArchComponent; layerId: string; editingBlocked: boolean
+}) {
+  const { upsertComponent, removeComponent } = useSandboxStore()
+  const { clearSelection } = useCanvasStore()
+
+  const update = useCallback((patch: Partial<ArchComponent>) => {
+    if (editingBlocked) return
+    upsertComponent(layerId, { ...component, ...patch })
+  }, [component, layerId, editingBlocked, upsertComponent])
+
+  const handleDelete = useCallback(() => {
+    if (editingBlocked) return
+    removeComponent(layerId, component.id)
+    clearSelection()
+  }, [layerId, component.id, editingBlocked, removeComponent, clearSelection])
+
   return (
     <div className="flex flex-col text-sm">
-      <PanelHeader title="Inspector" />
+      <PanelHeader title="Component Inspector" />
 
-      {/* Validation status */}
-      {validationStatus && (
-        <div className={clsx(
-          'mx-3 mt-2 text-[11px] rounded px-2 py-1',
-          validationStatus === 'valid'   ? 'bg-status-pass/10 text-status-pass' :
-          validationStatus === 'blocked' ? 'bg-status-blocked/10 text-status-blocked' :
-          validationStatus === 'requires_adr' ? 'bg-status-info/10 text-status-info' :
-          'bg-status-fail/10 text-status-fail',
-        )}>
-          {validationStatus === 'valid' ? '✓ Valid' : `⚠ ${validationStatus.replace('_', ' ')}`}
-          {validationMsg && <span className="block text-[10px] mt-0.5 opacity-80">{validationMsg}</span>}
-        </div>
-      )}
-
-      {/* Properties */}
-      <div className="p-3 flex flex-col gap-2">
-        <Field label="ID">
-          <span className="font-mono text-[11px] text-slate-400 break-all">{component.id}</span>
-        </Field>
-
+      <div className="p-3 flex flex-col gap-3">
         <Field label="Name">
-          <input
-            className={clsx(
-              'w-full bg-canvas-bg border rounded px-2 py-1 text-xs',
-              editingBlocked ? 'opacity-50 cursor-not-allowed border-canvas-border' : 'border-canvas-border focus:border-canvas-accent outline-none',
-            )}
-            value={editedName ?? component.name}
+          <EditableInput
+            value={component.name}
             disabled={editingBlocked}
-            onChange={(e) => setEditedName(e.target.value)}
-            onBlur={commitEdit}
+            onChange={(v) => update({ name: v })}
           />
         </Field>
 
         <Field label="Type">
-          <span className="font-mono text-xs text-slate-300">{component.type}</span>
+          <SelectField
+            value={component.type}
+            options={COMPONENT_TYPES}
+            disabled={editingBlocked}
+            onChange={(v) => update({ type: v as ArchComponent['type'] })}
+          />
         </Field>
 
         <Field label="Technology">
-          <input
-            className={clsx(
-              'w-full bg-canvas-bg border rounded px-2 py-1 text-xs',
-              editingBlocked ? 'opacity-50 cursor-not-allowed border-canvas-border' : 'border-canvas-border focus:border-canvas-accent outline-none',
-            )}
-            value={editedTech ?? (component.technology ?? '')}
+          <EditableInput
+            value={component.technology ?? ''}
             placeholder="e.g. postgresql, redis, fastapi…"
             disabled={editingBlocked}
-            onChange={(e) => setEditedTech(e.target.value)}
-            onBlur={commitEdit}
+            onChange={(v) => update({ technology: v || undefined })}
           />
         </Field>
 
         <Field label="Tier">
-          <TierBadge tier={component.tier} />
+          <SelectField
+            value={component.tier ?? 'standard'}
+            options={TIERS}
+            disabled={editingBlocked}
+            onChange={(v) => update({ tier: v as ArchComponent['tier'] })}
+          />
         </Field>
 
         <Field label="Data Classification">
-          <span className="font-mono text-xs text-slate-300">{component.data_classification ?? '—'}</span>
+          <SelectField
+            value={component.data_classification ?? 'internal'}
+            options={DATA_CLASSES}
+            disabled={editingBlocked}
+            onChange={(v) => update({ data_classification: v as ArchComponent['data_classification'] })}
+          />
         </Field>
 
         {/* Observed metrics */}
@@ -165,29 +137,110 @@ export function DesignInspectorPanel({ layerId, editingBlocked }: Props) {
               {component.observed_metrics.cache_hit_ratio !== undefined && (
                 <MetricRow label="CHR" value={`${(component.observed_metrics.cache_hit_ratio * 100).toFixed(1)}%`} />
               )}
-              {component.observed_metrics.last_updated && (
-                <MetricRow
-                  label="updated"
-                  value={new Date(component.observed_metrics.last_updated).toLocaleString()}
-                  warn={isStale(component.observed_metrics.last_updated)}
-                />
-              )}
             </div>
           </div>
         )}
 
-        {/* Delete button */}
+        <Field label="ID">
+          <span className="font-mono text-[10px] text-slate-500 break-all select-all">{component.id}</span>
+        </Field>
+
+        {/* Delete */}
         {!editingBlocked && (
-          <div className="mt-4 pt-3 border-t border-canvas-border">
+          <div className="mt-3 pt-3 border-t border-canvas-border">
             <button
               onClick={handleDelete}
               className="w-full py-2 rounded-md border border-status-fail/40 text-status-fail text-xs hover:bg-status-fail/10 transition-colors"
             >
               Delete Component
             </button>
-            <p className="text-[10px] text-slate-600 mt-1 text-center">
-              Or select and press Delete / Backspace
-            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Relation Inspector ────────────────────────────────────────────────────────
+
+function RelationInspector({ relation, layerId, editingBlocked }: {
+  relation: ArchRelation; layerId: string; editingBlocked: boolean
+}) {
+  const { upsertRelation, removeRelation } = useSandboxStore()
+  const { clearSelection } = useCanvasStore()
+  const layer = useSandboxStore.getState().getLayer(layerId)
+
+  const sourceName = layer?.components.find((c) => c.id === relation.source_id)?.name ?? relation.source_id
+  const targetName = layer?.components.find((c) => c.id === relation.target_id)?.name ?? relation.target_id
+
+  const update = useCallback((patch: Partial<ArchRelation>) => {
+    if (editingBlocked) return
+    upsertRelation(layerId, { ...relation, ...patch })
+  }, [relation, layerId, editingBlocked, upsertRelation])
+
+  const handleDelete = useCallback(() => {
+    if (editingBlocked) return
+    removeRelation(layerId, relation.id)
+    clearSelection()
+  }, [layerId, relation.id, editingBlocked, removeRelation, clearSelection])
+
+  return (
+    <div className="flex flex-col text-sm">
+      <PanelHeader title="Relation Inspector" />
+
+      <div className="p-3 flex flex-col gap-3">
+        <Field label="Source">
+          <span className="text-xs text-slate-300 font-medium">{sourceName}</span>
+        </Field>
+
+        <Field label="Target">
+          <span className="text-xs text-slate-300 font-medium">{targetName}</span>
+        </Field>
+
+        <Field label="Type">
+          <SelectField
+            value={relation.type ?? 'synchronous'}
+            options={RELATION_TYPES}
+            disabled={editingBlocked}
+            onChange={(v) => update({ type: v as ArchRelation['type'] })}
+          />
+        </Field>
+
+        <Field label="Protocol">
+          <SelectField
+            value={relation.protocol ?? 'HTTPS'}
+            options={PROTOCOLS}
+            disabled={editingBlocked}
+            onChange={(v) => update({ protocol: v })}
+          />
+        </Field>
+
+        <Field label="Crosses Trust Boundary">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={(relation as any).crosses_trust_boundary ?? false}
+              disabled={editingBlocked}
+              onChange={(e) => update({ crosses_trust_boundary: e.target.checked } as any)}
+              className="w-3.5 h-3.5 rounded border-canvas-border bg-canvas-bg accent-canvas-accent"
+            />
+            <span className="text-xs text-slate-400">Yes — crosses external boundary</span>
+          </label>
+        </Field>
+
+        <Field label="ID">
+          <span className="font-mono text-[10px] text-slate-500 break-all select-all">{relation.id}</span>
+        </Field>
+
+        {/* Delete */}
+        {!editingBlocked && (
+          <div className="mt-3 pt-3 border-t border-canvas-border">
+            <button
+              onClick={handleDelete}
+              className="w-full py-2 rounded-md border border-status-fail/40 text-status-fail text-xs hover:bg-status-fail/10 transition-colors"
+            >
+              Delete Relation
+            </button>
           </div>
         )}
       </div>
@@ -214,20 +267,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function TierBadge({ tier }: { tier?: string }) {
-  const colors: Record<string, string> = {
-    tier_1:    'text-tier-1 bg-tier-1/10',
-    standard:  'text-tier-standard bg-tier-standard/10',
-    auxiliary: 'text-tier-auxiliary bg-tier-auxiliary/10',
-  }
-  const style = tier ? (colors[tier] ?? '') : ''
-  return (
-    <span className={clsx('text-[11px] font-mono px-1.5 py-0.5 rounded w-fit', style)}>
-      {tier ?? 'unset'}
-    </span>
-  )
-}
-
 function MetricRow({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
   return (
     <div className="flex justify-between text-[11px]">
@@ -237,7 +276,47 @@ function MetricRow({ label, value, warn }: { label: string; value: string; warn?
   )
 }
 
-function isStale(isoDate: string): boolean {
-  const ageHours = (Date.now() - new Date(isoDate).getTime()) / 3_600_000
-  return ageHours > 24
+function EditableInput({ value, placeholder, disabled, onChange }: {
+  value: string; placeholder?: string; disabled: boolean; onChange: (v: string) => void
+}) {
+  const [local, setLocal] = useState(value)
+  // Sync when external value changes (e.g. switching selection)
+  if (value !== local && local === '') setLocal(value)
+
+  return (
+    <input
+      className={clsx(
+        'w-full bg-canvas-bg border rounded px-2 py-1.5 text-xs text-slate-200',
+        disabled ? 'opacity-50 cursor-not-allowed border-canvas-border' : 'border-canvas-border focus:border-canvas-accent outline-none',
+      )}
+      value={local}
+      placeholder={placeholder}
+      disabled={disabled}
+      onChange={(e) => setLocal(e.target.value)}
+      onBlur={() => { if (local !== value) onChange(local) }}
+      onKeyDown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } }}
+    />
+  )
+}
+
+function SelectField({ value, options, disabled, onChange }: {
+  value: string; options: readonly string[]; disabled: boolean; onChange: (v: string) => void
+}) {
+  return (
+    <select
+      className={clsx(
+        'w-full bg-canvas-bg border rounded px-2 py-1.5 text-xs text-slate-200 appearance-none',
+        disabled ? 'opacity-50 cursor-not-allowed border-canvas-border' : 'border-canvas-border focus:border-canvas-accent outline-none cursor-pointer',
+      )}
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      {options.map((opt) => (
+        <option key={opt} value={opt} className="bg-canvas-surface text-slate-200">
+          {opt.replace(/_/g, ' ')}
+        </option>
+      ))}
+    </select>
+  )
 }

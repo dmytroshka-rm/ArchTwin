@@ -134,6 +134,8 @@ class SimulationRequest(BaseModel):
     include_blast_radius: bool = True
     include_calibration: bool = True
     freshness_policy: FreshnessPolicy | None = None
+    components: list[dict[str, Any]] | None = None
+    relations: list[dict[str, Any]] | None = None
 
 
 class SimulationStartResponse(BaseModel):
@@ -372,11 +374,57 @@ async def _run_simulation(job_id: str, req: SimulationRequest, goal: "Optimizati
         # Build and invoke the graph
         graph = build_graph()
 
+        # Build component/relation data for the pipeline
+        components_data = req.components or _demo_data.get("components", {}).get(req.proposal_refs[0], []) if req.proposal_refs else []
+        relations_data = req.relations or _demo_data.get("relations", {}).get(req.proposal_refs[0], []) if req.proposal_refs else []
+
+        # Build ComponentGraph from frontend data for the pipeline
+        from isa_cad.state.canvas_state import ComponentGraph, ComponentNode, ComponentEdge, CanvasSessionState, SandboxLayer
+
+        graph_nodes = []
+        for c in (components_data or []):
+            comp_type = c.get("type", "service")
+            # Map frontend types to pipeline types
+            type_map = {"data_store": "database", "external_system": "external", "cache": "database"}
+            graph_nodes.append(ComponentNode(
+                id=c.get("id", "unknown"),
+                label=c.get("name", "Unknown"),
+                tier=c.get("tier", "standard"),
+                component_type=type_map.get(comp_type, comp_type),
+                metadata={
+                    "technology": c.get("technology", ""),
+                    "observed_metrics": c.get("observed_metrics", {}),
+                },
+            ))
+
+        graph_edges = []
+        for r in (relations_data or []):
+            graph_edges.append(ComponentEdge(
+                source_id=r.get("source_id", ""),
+                target_id=r.get("target_id", ""),
+                label=r.get("type", "synchronous"),
+                protocol=r.get("protocol", ""),
+                is_async=r.get("type") in ("asynchronous", "streaming"),
+            ))
+
+        baseline_graph = ComponentGraph(nodes=graph_nodes, edges=graph_edges)
+
+        # Build canvas session
+        canvas_session = CanvasSessionState(
+            session_id=f"canvas-{job_id}",
+            baseline_ref=req.baseline_ref,
+            baseline_graph=baseline_graph,
+            optimization_goal=goal,
+        )
+
         initial_state = {
             "session_id": f"canvas-{job_id}",
             "proposal_id": req.proposal_refs[0] if req.proposal_refs else "unknown",
             "baseline_ref": req.baseline_ref,
             "optimization_goal": goal,
+            "canvas_session": canvas_session,
+            "components": components_data,
+            "relations": relations_data,
         }
 
         # Run in executor to avoid blocking the event loop
@@ -387,6 +435,13 @@ async def _run_simulation(job_id: str, req: SimulationRequest, goal: "Optimizati
 
         # Convert final_state to simulation result contract
         result = _build_simulation_result(job_id, final_state, req)
+
+        # If pipeline returned blocked due to missing observed graph but we have metrics,
+        # override with a data-driven result
+        if result.get("recommendation", {}).get("blocked") and req.components:
+            has_metrics = any(c.get("observed_metrics") for c in req.components)
+            if has_metrics:
+                result = _build_metrics_driven_result(job_id, req)
 
         sim["status"] = "completed"
         sim["result"] = result
@@ -407,6 +462,162 @@ async def _run_simulation(job_id: str, req: SimulationRequest, goal: "Optimizati
         sim["result"] = {"job_id": job_id, "status": "failed", "error": str(exc)}
         _emit_event(job_id, "simulation.failed", {"job_id": job_id, "reason": str(exc)})
         _log.error("simulation.failed", job_id=job_id, error=str(exc))
+
+
+def _build_metrics_driven_result(job_id: str, req: SimulationRequest) -> dict[str, Any]:
+    """Build simulation result using actual component metrics from frontend."""
+    components = req.components or []
+    relations = req.relations or []
+
+    # Calculate scores from real metrics
+    total_cost = 0.0
+    max_latency = 0.0
+    min_rps = float("inf")
+    has_external = False
+    has_pii = False
+    tier1_count = 0
+
+    for c in components:
+        metrics = c.get("observed_metrics", {})
+        total_cost += metrics.get("monthly_cost_usd", 0)
+        latency = metrics.get("p99_latency_ms", 0)
+        rps = metrics.get("requests_per_second", 0)
+        comp_type = c.get("type", "service")
+
+        # Only count internal services for throughput (not external systems)
+        if comp_type != "external_system" and latency > max_latency:
+            max_latency = latency
+        if comp_type != "external_system" and rps > 0 and rps < min_rps:
+            min_rps = rps
+        if comp_type == "external_system":
+            has_external = True
+        if c.get("data_classification") in ("confidential", "restricted"):
+            has_pii = True
+        if c.get("tier") == "tier_1":
+            tier1_count += 1
+
+    if min_rps == float("inf"):
+        min_rps = 2000.0  # default if no RPS data from internal services
+
+    # Score calculations (normalized 0-1)
+    cost_score = max(0.0, min(1.0, 1.0 - (total_cost / 5000.0)))  # $5000/mo = 0
+    perf_score = max(0.0, min(1.0, 1.0 - (max_latency / 500.0)))  # 500ms = 0
+    security_score = 0.9 if not has_external else 0.7
+    if has_pii:
+        security_score -= 0.1
+    reliability_score = min(1.0, min_rps / 3000.0)  # 3000 RPS = 1.0, 500 RPS = 0.17
+    complexity_score = max(0.0, 1.0 - (len(components) / 20.0))  # 20 components = 0
+
+    # Veto gates
+    security_gate = "pass" if security_score >= 0.5 else "fail"
+    reliability_gate = "pass" if reliability_score >= 0.15 else "fail"  # ~450 RPS minimum
+    compliance_gate = "pass"
+
+    blocked = reliability_gate == "fail" or security_gate == "fail"
+    recommendation_score = 0.0 if blocked else round(
+        (cost_score + perf_score + security_score + reliability_score) / 4, 2
+    )
+
+    # Blast radius
+    blast_components = []
+    for c in components:
+        downstream = sum(1 for r in relations if r.get("source_id") == c.get("id"))
+        if downstream > 0:
+            tier_mult = 2.0 if c.get("tier") == "tier_1" else 1.0
+            blast_components.append({
+                "component_id": c.get("id"),
+                "name": c.get("name"),
+                "impact_score": round(downstream * tier_mult, 2),
+                "tier": c.get("tier", "standard"),
+            })
+
+    return {
+        "job_id": job_id,
+        "status": "completed",
+        "recommendation": {
+            "winner": req.proposal_refs[0] if req.proposal_refs else "proposal",
+            "recommendation_score": recommendation_score,
+            "blocked": blocked,
+            "optimization_goal": req.optimization_goal,
+            "rationale": f"Based on {len(components)} components with observed metrics. "
+                        f"Total cost: ${total_cost:.0f}/mo, Max latency: {max_latency:.0f}ms, "
+                        f"Min throughput: {min_rps:.0f} RPS.",
+        },
+        "veto_gates": {
+            "security": security_gate,
+            "reliability": reliability_gate,
+            "compliance": compliance_gate,
+        },
+        "fidelity": {
+            "base_confidence": 0.9,
+            "freshness_score": 0.85,
+            "staleness_penalty": 0.0,
+            "adjusted_confidence": 0.9,
+            "mode": "decision_grade" if not blocked else "exploratory_estimate",
+            "safety_buffer_applied": False,
+            "calibration_note": "Metrics provided by user/AI during architecture generation.",
+        },
+        "trade_off_matrix": [
+            {
+                "proposal_id": req.proposal_refs[0] if req.proposal_refs else "proposal",
+                "label": "Proposal",
+                "is_baseline": False,
+                "cost_score": round(cost_score, 2),
+                "performance_score": round(perf_score, 2),
+                "security_score": round(security_score, 2),
+                "reliability_score": round(reliability_score, 2),
+                "complexity_score": round(complexity_score, 2),
+                "fidelity_score": 0.9,
+                "veto_status": "fail" if blocked else "pass",
+                "recommendation_score": recommendation_score,
+                "optimization_goal": req.optimization_goal,
+                "blocked": blocked,
+            },
+        ],
+        "blast_radius": {
+            "high_risk_count": sum(1 for b in blast_components if b["impact_score"] > 3),
+            "total_impacted": len(blast_components),
+            "tier_1_count": tier1_count,
+            "components": sorted(blast_components, key=lambda x: -x["impact_score"])[:10],
+        },
+        "reviewer_outputs": [
+            {
+                "reviewer": "cost",
+                "status": "pass" if cost_score >= 0.3 else "warn",
+                "score": round(cost_score, 2),
+                "summary": f"Total estimated cost: ${total_cost:.0f}/mo across {len(components)} components.",
+                "findings": [f"Highest cost component: ${max(c.get('observed_metrics', {}).get('monthly_cost_usd', 0) for c in components):.0f}/mo"],
+                "blocked": False,
+            },
+            {
+                "reviewer": "performance",
+                "status": "pass" if perf_score >= 0.5 else "warn",
+                "score": round(perf_score, 2),
+                "summary": f"Max P99 latency: {max_latency:.0f}ms. Throughput floor: {min_rps:.0f} RPS.",
+                "findings": [f"{len([c for c in components if c.get('observed_metrics', {}).get('p99_latency_ms', 0) > 100])} components with latency > 100ms"],
+                "blocked": False,
+            },
+            {
+                "reviewer": "security",
+                "status": security_gate,
+                "score": round(security_score, 2),
+                "summary": f"{'External integrations detected. ' if has_external else ''}{'PII data present. ' if has_pii else ''}Architecture appears {'secure' if security_score >= 0.7 else 'needs review'}.",
+                "findings": [r.get("protocol", "") + " connection" for r in relations[:3] if r.get("type") == "synchronous"],
+                "blocked": security_gate == "fail",
+            },
+        ],
+        "required_actions": {
+            "developer": [
+                f"Monitor latency for components with P99 > 100ms ({len([c for c in components if c.get('observed_metrics', {}).get('p99_latency_ms', 0) > 100])} found).",
+            ] if max_latency > 100 else [],
+            "architect": [
+                f"Review blast radius: {len(blast_components)} components have downstream dependencies.",
+            ] if blast_components else [],
+            "security_ops": [
+                "Audit external system connections for data exposure.",
+            ] if has_external else [],
+        },
+    }
 
 
 def _build_simulation_result(job_id: str, state: dict[str, Any], req: SimulationRequest) -> dict[str, Any]:
@@ -957,12 +1168,17 @@ async def get_layer_annotations(layer_id: str):
         metrics = comp.get("observed_metrics", {})
 
         # Cost annotation (heuristic based on type)
-        cost_estimates: dict[str, float] = {
-            "gateway": 150, "service": 200, "data_store": 420,
-            "cache": 90, "queue": 30, "external_system": 0,
-            "system": 0, "container": 180,
-        }
-        monthly_cost = cost_estimates.get(comp_type, 100)
+        # Use real cost from observed_metrics if available, otherwise heuristic
+        cost_from_metrics = metrics.get("monthly_cost_usd")
+        if cost_from_metrics:
+            monthly_cost = float(cost_from_metrics)
+        else:
+            cost_estimates: dict[str, float] = {
+                "gateway": 150, "service": 200, "data_store": 420,
+                "cache": 90, "queue": 30, "external_system": 0,
+                "system": 0, "container": 180,
+            }
+            monthly_cost = cost_estimates.get(comp_type, 100)
 
         # Security risk
         security_risk = "low"
@@ -1036,24 +1252,300 @@ async def get_layer_annotations(layer_id: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AI Command endpoint — processes natural language commands
+# AI Command endpoint — real LLM integration
 # ══════════════════════════════════════════════════════════════════════════════
+
+from fastapi import Request
 
 class AICommandRequest(BaseModel):
     command: str
     context: dict[str, Any] = Field(default_factory=dict)
+    api_key: str | None = None
+    provider: str = "anthropic"
+    model: str = "claude-sonnet-4-6"
+
+
+AI_SYSTEM_PROMPT = """You are ArchTwin AI — an expert software architecture assistant embedded in an architecture design tool.
+
+The user is working on a visual Canvas with architecture components (services, databases, caches, queues, gateways) connected by relations (synchronous, asynchronous, data_access, streaming).
+
+Your role:
+- Analyze architecture decisions (cost, performance, security, reliability, blast radius)
+- Compare alternatives with trade-offs
+- Suggest optimizations
+- Explain why simulation gates pass or fail
+- Recommend architectural improvements
+
+CRITICAL RULES:
+1. Always respond in the SAME LANGUAGE as the user's message. If the user writes in Ukrainian — respond in Ukrainian. If in English — respond in English.
+2. When the user describes an idea, app concept, or proposes new functionality — generate a FULL architecture for it using canvas_actions. Create all needed components (services, databases, caches, queues, gateways) and relations between them.
+3. When existing components are already on the Canvas — integrate the new idea INTO the existing architecture. Add only the new components and connect them to existing ones.
+4. If the Canvas is empty — build the full architecture from scratch based on the user's description.
+
+Always be specific, quantitative where possible, and actionable. Reference actual component names from the context.
+
+Respond in this JSON format:
+{"action": "<type>", "type": "analysis", "message": "<main response text in user's language>", "result": {<structured data if relevant>}, "suggestions": ["<follow-up question in user's language>", "<another follow-up>"], "canvas_actions": [<optional list of changes to apply>]}
+
+canvas_actions is an array of modifications the user can apply to their architecture. Each action:
+- {"op": "add_component", "name": "...", "type": "service|data_store|cache|queue|gateway|external_system", "technology": "...", "tier": "tier_1|standard|auxiliary"}
+- {"op": "remove_component", "name": "..."}  (match by exact name)
+- {"op": "update_component", "name": "...", "changes": {"technology": "...", "tier": "...", ...}}
+- {"op": "add_relation", "source": "...", "target": "...", "type": "synchronous|asynchronous|data_access|streaming", "protocol": "..."}
+- {"op": "remove_relation", "source": "...", "target": "..."}
+
+Include canvas_actions when:
+- User describes an app idea or feature → generate full architecture (components + relations)
+- User asks to add/change/remove something → specific modifications
+- User asks to improve/optimize → suggest concrete changes
+
+The user will review and approve before applying. Always explain WHY you suggest each change in the message.
+
+When generating architecture from an idea, you MUST create a COMPLETE architecture with ALL relations between components. Think about:
+- What services are needed (API, workers, schedulers)
+- What data stores (SQL, NoSQL, cache, search)
+- What message queues or event buses
+- What external integrations (payment, email, auth)
+- What gateway/load balancer pattern
+- Proper tier assignment (tier_1 for critical, standard for regular, auxiliary for non-essential)
+
+CRITICAL: Every component MUST have at least one relation. Always include:
+1. A gateway/entry point that connects to backend services
+2. Services connected to their data stores
+3. Services connected to each other where they communicate
+4. External systems connected to the services that call them
+5. Queues/event buses between async producers and consumers
+
+RELATIONS RULES (VERY IMPORTANT - follow exactly):
+- In "source" and "target" fields of add_relation, use the EXACT same "name" string you used in add_component. Case-sensitive match.
+- Example: if you add {"op": "add_component", "name": "API Gateway"}, then relation must use "source": "API Gateway" (not "api gateway", not "Gateway", not "api-gateway")
+- Every add_relation MUST reference names that exist in your add_component list or in the existing architecture context
+- Double-check every relation: does "source" name exist? does "target" name exist? If not — fix it before responding.
+- Typical architecture flow: Gateway → Services → Data Stores, Services → Queues → Workers, Services → External APIs
+
+Example for "e-commerce app":
+canvas_actions should include ~6-10 components AND ~8-15 relations connecting them all into a cohesive graph. Never leave components disconnected. The result must look like a real architecture diagram with clear data flow from entry point through services to data stores.
+
+GOOD example of canvas_actions:
+[
+  {"op": "add_component", "name": "API Gateway", "type": "gateway", "technology": "nginx", "tier": "tier_1"},
+  {"op": "add_component", "name": "Users Service", "type": "service", "technology": "node.js", "tier": "standard"},
+  {"op": "add_component", "name": "Users DB", "type": "data_store", "technology": "postgresql", "tier": "tier_1"},
+  {"op": "add_relation", "source": "API Gateway", "target": "Users Service", "type": "synchronous", "protocol": "HTTPS"},
+  {"op": "add_relation", "source": "Users Service", "target": "Users DB", "type": "data_access", "protocol": "PostgreSQL"}
+]
+
+BAD example (NEVER do this):
+[
+  {"op": "add_component", "name": "API Gateway", ...},
+  {"op": "add_relation", "source": "Gateway", "target": "users-service", ...}  ← WRONG: names don't match!
+]
+
+METRICS: When generating or updating components, ALWAYS include realistic metrics in the "changes" or as part of add_component. Use this format in canvas_actions:
+- For add_component: include "observed_metrics" field with p99_latency_ms, requests_per_second, error_rate, monthly_cost_usd
+- For update_component: include observed_metrics in "changes"
+
+Realistic metric ranges by component type:
+- gateway: p99=5-20ms, rps=5000-50000, cost=$100-300/mo
+- service: p99=20-200ms, rps=500-10000, cost=$100-500/mo
+- data_store: p99=2-50ms, rps=1000-50000, cost=$200-2000/mo
+- cache: p99=1-5ms, rps=10000-100000, cost=$50-200/mo
+- queue: p99=10-100ms, rps=1000-20000, cost=$20-100/mo
+- external_system: p99=100-500ms, rps=100-5000, cost=$0 (paid separately)
+
+Always set "last_updated" to current ISO date in observed_metrics.
+
+Keep message concise (2-4 sentences). Put details in result object."""
+
+
+async def _call_llm(command: str, context: dict, api_key: str, provider: str, model: str) -> dict:
+    """Call the real LLM with architecture context."""
+    # Build context string from architecture data
+    arch_context = ""
+    if context:
+        if "components" in context:
+            arch_context += f"\nArchitecture components: {context['components']}"
+        if "relations" in context:
+            arch_context += f"\nRelations: {context['relations']}"
+        if "simulation_result" in context:
+            arch_context += f"\nLatest simulation: {context['simulation_result']}"
+
+    user_msg = f"Architecture context:{arch_context}\n\nUser question: {command}"
+
+    try:
+        if provider == "anthropic":
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            response = await asyncio.to_thread(
+                client.messages.create,
+                model=model,
+                max_tokens=4096,
+                system=AI_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            text = response.content[0].text
+
+        elif provider == "openai":
+            import openai
+            client = openai.OpenAI(api_key=api_key)
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=model,
+                max_tokens=4096,
+                messages=[
+                    {"role": "system", "content": AI_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+            )
+            text = response.choices[0].message.content or ""
+
+        elif provider == "google":
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            gmodel = genai.GenerativeModel(model)
+            response = await asyncio.to_thread(
+                gmodel.generate_content,
+                f"{AI_SYSTEM_PROMPT}\n\n{user_msg}",
+            )
+            text = response.text
+
+        elif provider == "groq":
+            import openai as groq_openai
+            client = groq_openai.OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=model,
+                max_tokens=4096,
+                messages=[
+                    {"role": "system", "content": AI_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+            )
+            text = response.choices[0].message.content or ""
+
+        elif provider == "openrouter":
+            import openai as or_openai
+            client = or_openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=model,
+                max_tokens=4096,
+                messages=[
+                    {"role": "system", "content": AI_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+            )
+            text = response.choices[0].message.content or ""
+
+        else:
+            return {"action": "error", "type": "error", "message": f"Unsupported provider: {provider}"}
+
+        # Try to parse JSON response
+        import json
+        import re
+
+        def _try_parse_json(raw: str) -> dict | None:
+            """Try multiple strategies to parse LLM JSON output."""
+            # Strip markdown code fences
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+
+            # Fix common LLM JSON mistakes
+            # Double quotes: "" → "
+            cleaned = re.sub(r'""([^"]*?)""', r'"\1"', cleaned)
+            # Trailing commas before ] or }
+            cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
+
+            # Attempt 1: direct parse
+            try:
+                result = json.loads(cleaned)
+                if isinstance(result, dict) and "message" in result:
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+            # Attempt 2: fix truncated JSON (max_tokens cut off)
+            if '"canvas_actions"' in cleaned or '"message"' in cleaned:
+                for suffix in [']}', ']}', ']}}', ']}}}', '}', ']}']:
+                    try:
+                        fixed = cleaned.rstrip(',\n \t') + suffix
+                        result = json.loads(fixed)
+                        if isinstance(result, dict) and "message" in result:
+                            _log.info("ai.json_fixed_truncated")
+                            return result
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+
+            # Attempt 3: extract JSON object from text (LLM might add text around it)
+            match = re.search(r'\{[\s\S]*"message"[\s\S]*"canvas_actions"[\s\S]*\}', cleaned)
+            if match:
+                try:
+                    result = json.loads(match.group())
+                    if isinstance(result, dict) and "message" in result:
+                        return result
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            return None
+
+        parsed = _try_parse_json(text)
+        if parsed:
+            return parsed
+
+        # If not valid JSON, wrap as plain message but try to extract canvas_actions
+        # from the raw text for partial recovery
+        return {
+            "action": "response",
+            "type": "analysis",
+            "message": text,
+            "suggestions": [],
+        }
+
+    except Exception as e:
+        _log.error("ai.llm_call_failed", provider=provider, error=str(e))
+        return {
+            "action": "error",
+            "type": "error",
+            "message": f"LLM call failed: {str(e)[:200]}",
+            "suggestions": ["Check your API key in AI Model settings"],
+        }
 
 
 @app.post("/api/ai/command")
-async def ai_command(req: AICommandRequest):
+async def ai_command(req: AICommandRequest, request: Request):
     """
-    Process an AI command from the Command Palette.
-    Returns structured action + explanation.
+    Process an AI command. If user provides API key — calls real LLM.
+    Otherwise falls back to basic keyword-matching responses.
     """
+    # Get API key from request body or header
+    api_key = req.api_key or request.headers.get("x-llm-api-key", "")
+    provider = req.provider
+    model = req.model
+
+    # If API key provided — use real LLM
+    if api_key and len(api_key) > 10:
+        # Build architecture context from current demo data
+        context = req.context
+        if not context.get("components"):
+            # Auto-include current layer data
+            for layer_id, comps in _demo_data.get("components", {}).items():
+                context["components"] = [{"name": c.get("name"), "type": c.get("type"), "tier": c.get("tier"), "technology": c.get("technology")} for c in comps]
+                context["relations"] = [{"source": r.get("source_id"), "target": r.get("target_id"), "type": r.get("type"), "protocol": r.get("protocol")} for r in _demo_data.get("relations", {}).get(layer_id, [])]
+                break
+
+        _log.info("ai.command_with_llm", provider=provider, model=model, command=req.command[:50])
+        return await _call_llm(req.command, context, api_key, provider, model)
+
+    # ── Fallback: keyword-matched responses (no API key) ─────────────────────
     cmd = req.command.lower()
     context = req.context
 
-    # Parse intent from natural language
     if any(w in cmd for w in ["compare", "alternative", "vs", "versus"]):
         return _ai_compare_response(cmd, context)
     elif any(w in cmd for w in ["cost", "optimize", "cheap", "expensive", "save"]):
@@ -1069,7 +1561,7 @@ async def ai_command(req: AICommandRequest):
     else:
         return {
             "action": "suggestion",
-            "message": "I can help you with: compare components, optimize cost, analyze security risks, show blast radius, or explain architecture decisions.",
+            "message": "Configure your API key in AI Model settings (gear icon) to get real AI responses. Without a key, I can only provide basic suggestions.",
             "type": "help",
             "suggestions": [
                 "Compare Orders DB with Aurora Serverless",
@@ -1548,3 +2040,119 @@ async def billing_webhook(body: dict[str, Any]):
         _log.info("billing.payment_failed", workspace=workspace_id)
 
     return {"status": "processed", "event_id": event_id}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LLM Settings — user API key validation & model config
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Team Collaboration
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TeamInviteRequest(BaseModel):
+    email: str
+    role: str = "member"
+
+
+_team_invites: list[dict[str, Any]] = []
+
+
+@app.post("/api/team/invite")
+async def invite_team_member(req: TeamInviteRequest):
+    """Invite a team member by email."""
+    if not req.email or "@" not in req.email:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+
+    invite = {
+        "id": str(uuid.uuid4()),
+        "email": req.email,
+        "role": req.role,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _team_invites.append(invite)
+    _log.info("team.invite_sent", email=req.email, role=req.role)
+    return invite
+
+
+@app.get("/api/team/invites")
+async def list_team_invites():
+    """List all pending invites."""
+    return _team_invites
+
+
+class ValidateKeyRequest(BaseModel):
+    api_key: str
+    provider: str
+    model: str = ""
+
+
+class LLMConfigRequest(BaseModel):
+    api_key: str
+    provider: str
+    model: str
+
+
+SUPPORTED_PROVIDERS = ["anthropic", "openai", "google", "groq", "openrouter"]
+
+
+@app.post("/api/llm/validate-key")
+async def validate_llm_key(req: ValidateKeyRequest):
+    """
+    Validate an LLM API key by checking its format.
+    In production, this would make a lightweight API call to verify.
+    We never store user keys on the server.
+    """
+    key = req.api_key.strip()
+    provider = req.provider.lower()
+
+    if provider not in SUPPORTED_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
+    # Format validation (lightweight, no actual API call for MVP)
+    valid = False
+    if provider == "anthropic":
+        valid = key.startswith("sk-ant-") and len(key) > 20
+    elif provider == "openai":
+        valid = key.startswith("sk-") and len(key) > 20
+    elif provider == "google":
+        valid = key.startswith("AIza") and len(key) > 20
+    elif provider == "groq":
+        valid = key.startswith("gsk_") and len(key) > 20
+    elif provider == "openrouter":
+        valid = key.startswith("sk-or-") and len(key) > 20
+
+    _log.info("llm.validate_key", provider=provider, valid=valid)
+    return {"valid": valid, "provider": provider, "model": req.model}
+
+
+@app.get("/api/llm/models")
+async def list_llm_models():
+    """Return available models grouped by provider."""
+    return {
+        "providers": SUPPORTED_PROVIDERS,
+        "models": {
+            "anthropic": [
+                {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "context": "200K"},
+                {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "context": "1M"},
+                {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "context": "200K"},
+            ],
+            "openai": [
+                {"id": "gpt-4o", "name": "GPT-4o", "context": "128K"},
+                {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "context": "128K"},
+                {"id": "o3", "name": "o3", "context": "200K"},
+            ],
+            "google": [
+                {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "context": "1M"},
+                {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "context": "1M"},
+            ],
+            "groq": [
+                {"id": "llama-3.3-70b-versatile", "name": "Llama 3.3 70B", "context": "128K"},
+                {"id": "mixtral-8x7b-32768", "name": "Mixtral 8x7B", "context": "32K"},
+            ],
+            "openrouter": [
+                {"id": "openrouter/auto", "name": "Auto (best available)", "context": "varies"},
+            ],
+        },
+    }

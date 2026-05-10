@@ -40,8 +40,6 @@ export function ComponentPalette({ isOpen, editingBlocked }: Props) {
     e.dataTransfer.effectAllowed = 'copy'
   }
 
-  if (!isOpen) return null
-
   const filtered = search
     ? PALETTE_ITEMS.filter((p) =>
         p.label.toLowerCase().includes(search.toLowerCase()) ||
@@ -49,10 +47,15 @@ export function ComponentPalette({ isOpen, editingBlocked }: Props) {
       )
     : PALETTE_ITEMS
 
+  // Hidden state — render nothing with slide-out transition
+  if (!isOpen) {
+    return <aside className="w-0 shrink-0 overflow-hidden transition-all duration-200" />
+  }
+
   // ── Collapsed mode: just icons ──────────────────────────────────────────
   if (collapsed) {
     return (
-      <aside className="w-10 shrink-0 bg-canvas-surface border-r border-canvas-border flex flex-col items-center py-1">
+      <aside className="w-10 shrink-0 bg-canvas-surface border-r border-canvas-border flex flex-col items-center py-1 transition-all duration-200 animate-in slide-in-from-left">
         <button
           onClick={() => setCollapsed(false)}
           className="text-[10px] text-slate-600 hover:text-slate-400 mb-1 py-1"
@@ -80,7 +83,7 @@ export function ComponentPalette({ isOpen, editingBlocked }: Props) {
 
   // ── Full mode ───────────────────────────────────────────────────────────
   return (
-    <aside className="w-48 shrink-0 bg-canvas-surface border-r border-canvas-border flex flex-col">
+    <aside className="w-48 shrink-0 bg-canvas-surface border-r border-canvas-border flex flex-col transition-all duration-200">
       {/* Header with collapse button */}
       <div className="flex items-center px-2 pt-2 pb-1 gap-1">
         <input

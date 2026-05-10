@@ -3,7 +3,7 @@
  * Handles drag-and-drop from palette and dispatches CanvasOperations to backend.
  */
 
-import { useCallback, useRef, useEffect } from 'react'
+import { useCallback, useRef, useEffect, useState } from 'react'
 import {
   ReactFlow,
   Background,
@@ -13,18 +13,19 @@ import {
   useNodesState,
   useEdgesState,
   BackgroundVariant,
+  ConnectionMode,
   type Node,
   type Edge,
   type Connection,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { nanoid } from './nanoid'
 
 import { C4NodeBase, type C4NodeData } from './nodes/C4NodeBase'
 import { C4Edge, type C4EdgeData } from './edges/C4Edge'
 import { useCanvasStore } from '@/store/canvasStore'
 import { useSandboxStore } from '@/store/sandboxStore'
-import { canvasApi } from '@/api/endpoints'
 import type { ComponentType, ArchComponent } from '@/generated/isa.types'
 import type { CanvasOperationType, CanvasOperationStatus } from '@/generated/canvas-operation.types'
 
@@ -37,19 +38,72 @@ const EDGE_TYPES: Record<string, any> = { c4: C4Edge }
 
 // ── Props ─────────────────────────────────────────────────────────────────
 
+import type { ViewMode } from './CanvasShell'
+import { canvasApi, type NodeAnnotation } from '@/api/endpoints'
+
 interface Props {
   layerId: string
   editingBlocked: boolean
+  viewMode?: ViewMode
 }
 
 // ── Component ─────────────────────────────────────────────────────────────
 
-export function C4GraphRenderer({ layerId, editingBlocked }: Props) {
+export function C4GraphRenderer({ layerId, editingBlocked, viewMode = 'topology' }: Props) {
   const { addPendingOp, resolvePendingOp, setSelection, nodeLayouts } = useCanvasStore()
   const { upsertComponent, getLayer } = useSandboxStore()
 
   const layer = getLayer(layerId)
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
+
+  // Compute annotations locally from store data (works for AI-generated components too)
+  const [annotations, setAnnotations] = useState<Record<string, NodeAnnotation>>({})
+  useEffect(() => {
+    if (viewMode === 'topology') { setAnnotations({}); return }
+    const components = layer?.components ?? []
+    const relations = layer?.relations ?? []
+    const result: Record<string, NodeAnnotation> = {}
+
+    for (const comp of components) {
+      const compType = comp.type || 'service'
+      const tier = comp.tier || 'standard'
+      const metrics = comp.observed_metrics || {}
+
+      // Cost
+      const costFromMetrics = (metrics as any).monthly_cost_usd
+      const costEstimates: Record<string, number> = {
+        gateway: 150, service: 200, data_store: 420, cache: 90, queue: 30, external_system: 0,
+      }
+      const monthlyCost = costFromMetrics ? Number(costFromMetrics) : (costEstimates[compType] ?? 100)
+      const costLevel = monthlyCost > 300 ? 'high' : monthlyCost > 100 ? 'medium' : 'low'
+
+      // Security
+      const isExternalFacing = compType === 'gateway'
+      const hasPii = comp.data_classification === 'restricted' || comp.data_classification === 'confidential'
+      const crossesBoundary = relations.some(
+        (r) => (r.source_id === comp.id || r.target_id === comp.id) && (r as any).crosses_trust_boundary
+      )
+      const securityRisk = (isExternalFacing || crossesBoundary) ? 'high' : hasPii ? 'medium' : 'low'
+
+      // Performance
+      const latency = metrics.p99_latency_ms
+      const rps = metrics.requests_per_second
+      const perfRisk = latency && latency > 100 ? 'high' : latency && latency > 50 ? 'medium' : 'low'
+
+      // Blast radius
+      const downstreamCount = relations.filter((r) => r.source_id === comp.id).length
+      const tierMultiplier = tier === 'tier_1' ? 2.0 : tier === 'standard' ? 1.0 : 0.5
+      const blastWeight = downstreamCount * tierMultiplier
+
+      result[comp.id] = {
+        cost: { monthly_usd: monthlyCost, label: `$${monthlyCost}/mo`, level: costLevel as any },
+        security: { risk: securityRisk as any, external_facing: isExternalFacing, has_pii: hasPii, crosses_boundary: crossesBoundary },
+        performance: { risk: perfRisk as any, p99_ms: latency ?? null, rps: rps ?? null },
+        blast_radius: { downstream_count: downstreamCount, weight: blastWeight, tier },
+      }
+    }
+    setAnnotations(result)
+  }, [viewMode, layer?.components, layer?.relations])
 
   // Hydrate React Flow state from store (with positions from layout store)
   const initialNodes: Node<C4NodeData>[] = (layer?.components ?? []).map((c) => {
@@ -73,20 +127,83 @@ export function C4GraphRenderer({ layerId, editingBlocked }: Props) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<C4NodeData>>(initialNodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<C4EdgeData>>(initialEdges)
 
-  // Sync React Flow state when store data changes (e.g. delete from Inspector)
+  // Sync React Flow state when store data changes (add/remove/switch layer)
   const storeComponents = layer?.components
   const storeRelations = layer?.relations
   useEffect(() => {
-    if (!storeComponents) return
-    const storeIds = new Set(storeComponents.map((c) => c.id))
-    setNodes((ns) => ns.filter((n) => storeIds.has(n.id)))
-  }, [storeComponents, setNodes])
+    if (!storeComponents) { setNodes([]); return }
+    const storeMap = new Map(storeComponents.map((c) => [c.id, c]))
+    setNodes((prev) => {
+      // Update existing nodes with fresh data (preserves positions from drag)
+      const updated = prev
+        .filter((n) => storeMap.has(n.id))
+        .map((n) => {
+          const c = storeMap.get(n.id)!
+          return { ...n, data: { ...c, label: c.name, ...( n.data._viewMode ? { _viewMode: n.data._viewMode, _annotation: n.data._annotation } : {}) } as C4NodeData }
+        })
+      const updatedIds = new Set(updated.map((n) => n.id))
+      // Add new nodes that aren't in React Flow yet
+      const added = storeComponents
+        .filter((c) => !updatedIds.has(c.id))
+        .map((c) => {
+          const layout = nodeLayouts[c.id]
+          return {
+            id: c.id,
+            type: 'c4' as const,
+            position: layout ? { x: layout.x, y: layout.y } : { x: Math.random() * 600, y: Math.random() * 400 },
+            data: { ...c, label: c.name } as C4NodeData,
+          }
+        })
+      return [...updated, ...added]
+    })
+  }, [storeComponents, setNodes, nodeLayouts])
 
   useEffect(() => {
-    if (!storeRelations) return
-    const storeIds = new Set(storeRelations.map((r) => r.id))
-    setEdges((es) => es.filter((e) => storeIds.has(e.id)))
+    if (!storeRelations) { setEdges([]); return }
+    const storeMap = new Map(storeRelations.map((r) => [r.id, r]))
+    setEdges((prev) => {
+      // Update existing edges with fresh data, remove deleted, add new
+      const updated = prev
+        .filter((e) => storeMap.has(e.id))
+        .map((e) => {
+          const r = storeMap.get(e.id)!
+          return {
+            ...e,
+            source: r.source_id,
+            target: r.target_id,
+            data: { relationType: r.type, protocol: r.protocol, crosses_trust_boundary: (r as any).crosses_trust_boundary } as C4EdgeData,
+          }
+        })
+      const updatedIds = new Set(updated.map((e) => e.id))
+      const added = storeRelations
+        .filter((r) => !updatedIds.has(r.id))
+        .map((r) => ({
+          id: r.id,
+          source: r.source_id,
+          target: r.target_id,
+          type: 'c4' as const,
+          data: { relationType: r.type, protocol: r.protocol, crosses_trust_boundary: (r as any).crosses_trust_boundary } as C4EdgeData,
+        }))
+      return [...updated, ...added]
+    })
   }, [storeRelations, setEdges])
+
+  // ── Apply view mode annotations to node data ────────────────────────────
+  useEffect(() => {
+    if (!Object.keys(annotations).length) return
+    setNodes((prev) => prev.map((n) => {
+      const ann = annotations[n.id]
+      if (!ann) return n
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          _viewMode: viewMode,
+          _annotation: ann,
+        },
+      }
+    }))
+  }, [annotations, viewMode, setNodes])
 
   // ── Drag-and-drop from palette (Section 5.1) ────────────────────────────
 
@@ -184,25 +301,56 @@ export function C4GraphRenderer({ layerId, editingBlocked }: Props) {
   const onConnect = useCallback(
     (connection: Connection) => {
       if (editingBlocked) return
-      setEdges((es) => addEdge({ ...connection, type: 'c4', data: { relationType: 'synchronous' } as C4EdgeData }, es))
+      if (!connection.source || !connection.target) return
+
+      // Create a proper relation and save to store
+      const relationId = `rel-${connection.source}-${connection.target}-${Date.now()}`
+      const newRelation: import('@/generated/isa.types').ArchRelation = {
+        id: relationId,
+        source_id: connection.source,
+        target_id: connection.target,
+        type: 'synchronous',
+        protocol: 'HTTPS',
+      }
+
+      // Save to sandbox store (persisted via Firestore/localStorage)
+      const { upsertRelation } = useSandboxStore.getState()
+      upsertRelation(layerId, newRelation)
+
+      // Also add to React Flow local state for immediate visual
+      setEdges((es) => addEdge({
+        ...connection,
+        id: relationId,
+        type: 'c4',
+        data: { relationType: 'synchronous', protocol: 'HTTPS' } as C4EdgeData,
+      }, es))
     },
-    [editingBlocked, setEdges],
+    [editingBlocked, layerId, setEdges],
   )
 
   // ── Delete selected nodes/edges (Delete or Backspace) ────────────────────
 
+  // ── Delete with confirmation ──────────────────────────────────────────────
+  const [deleteConfirm, setDeleteConfirm] = useState<{ nodes: Node[] } | null>(null)
+
   const onNodesDelete = useCallback(
     (deleted: Node[]) => {
       if (editingBlocked) return
-      const ids = deleted.map((n) => n.id)
-      // Remove from sandbox store
-      const { removeComponent } = useSandboxStore.getState()
-      ids.forEach((id) => removeComponent(layerId, id))
-      // Also remove edges connected to deleted nodes
-      setEdges((es) => es.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)))
+      setDeleteConfirm({ nodes: deleted })
     },
-    [editingBlocked, layerId, setEdges],
+    [editingBlocked],
   )
+
+  const confirmDelete = useCallback(() => {
+    if (!deleteConfirm) return
+    const ids = deleteConfirm.nodes.map((n) => n.id)
+    const { removeComponent } = useSandboxStore.getState()
+    ids.forEach((id) => removeComponent(layerId, id))
+    setEdges((es) => es.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)))
+    setDeleteConfirm(null)
+  }, [deleteConfirm, layerId, setEdges])
+
+  const cancelDelete = useCallback(() => setDeleteConfirm(null), [])
 
   const onEdgesDelete = useCallback(
     (deleted: Edge[]) => {
@@ -211,6 +359,16 @@ export function C4GraphRenderer({ layerId, editingBlocked }: Props) {
       deleted.forEach((e) => removeRelation(layerId, e.id))
     },
     [editingBlocked, layerId],
+  )
+
+  // ── Save positions on drag ───────────────────────────────────────────────
+
+  const onNodeDragStop = useCallback(
+    (_event: React.MouseEvent, node: Node) => {
+      const { setNodeLayout } = useCanvasStore.getState()
+      setNodeLayout(node.id, { x: node.position.x, y: node.position.y })
+    },
+    [],
   )
 
   // ── Selection ────────────────────────────────────────────────────────────
@@ -234,6 +392,7 @@ export function C4GraphRenderer({ layerId, editingBlocked }: Props) {
         onNodesDelete={onNodesDelete}
         onEdgesDelete={onEdgesDelete}
         onConnect={onConnect}
+        onNodeDragStop={onNodeDragStop}
         onSelectionChange={onSelectionChange}
         deleteKeyCode={editingBlocked ? null : ['Backspace', 'Delete']}
         onMoveEnd={(_, viewport) => {
@@ -242,6 +401,8 @@ export function C4GraphRenderer({ layerId, editingBlocked }: Props) {
         nodesDraggable={!editingBlocked}
         nodesConnectable={!editingBlocked}
         elementsSelectable={true}
+        connectionRadius={25}
+        connectionMode={ConnectionMode.Loose}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         proOptions={{ hideAttribution: true }}
@@ -258,6 +419,15 @@ export function C4GraphRenderer({ layerId, editingBlocked }: Props) {
           maskColor="rgba(15, 17, 23, 0.8)"
         />
       </ReactFlow>
+
+      {/* Delete confirmation */}
+      <ConfirmDialog
+        open={!!deleteConfirm}
+        title={`Delete ${deleteConfirm?.nodes.length === 1 ? deleteConfirm.nodes[0].data.name : `${deleteConfirm?.nodes.length} components`}?`}
+        message={`This will permanently remove the component${(deleteConfirm?.nodes.length ?? 0) > 1 ? 's' : ''} and all connected relations.`}
+        onConfirm={confirmDelete}
+        onCancel={cancelDelete}
+      />
     </div>
   )
 }

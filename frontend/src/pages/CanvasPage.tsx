@@ -11,6 +11,7 @@ import { useSimulationStore } from '@/store/simulationStore'
 import { useSandboxStore } from '@/store/sandboxStore'
 import { useCanvasStore } from '@/store/canvasStore'
 import { useBillingStore } from '@/store/billingStore'
+import { useLLMSettingsStore } from '@/store/llmSettingsStore'
 import { CanvasShell } from '@/components/canvas/CanvasShell'
 import { PlanBadge } from '@/pages/BillingPage'
 import { billingApi } from '@/api/endpoints'
@@ -30,7 +31,7 @@ export function CanvasPage() {
   const navigate = useNavigate()
 
   useVersionHandshake()
-  useFirestoreSync()  // Auto-load from Firestore + auto-save on changes
+  const { firestoreReady } = useFirestoreSync()  // Auto-load from Firestore + auto-save on changes
 
   // Load billing subscription
   const { plan: currentPlan } = useBillingStore()
@@ -75,12 +76,17 @@ export function CanvasPage() {
   }, [setBaselineRef, upsertLayer, setActiveLayer, setLayerComponents, setLayerRelations, setNodeLayout])
 
   useEffect(() => {
-    if (backendCompatible !== null && !ready && !baselineRef) {
+    // Wait for both backend handshake AND Firestore load before deciding
+    if (backendCompatible === null || !firestoreReady) return
+
+    if (!ready && !baselineRef) {
+      // No saved data in Firestore — load demo
       loadDemo()
-    } else if (backendCompatible !== null && baselineRef) {
+    } else if (!ready && baselineRef) {
+      // Firestore restored data — just mark ready
       setReady(true)
     }
-  }, [backendCompatible, ready, baselineRef, loadDemo])
+  }, [backendCompatible, firestoreReady, ready, baselineRef, loadDemo])
 
   // Loading states
   if (authLoading) {
@@ -99,11 +105,23 @@ export function CanvasPage() {
         <span className="text-slate-300 ml-1 font-medium">{user.displayName || user.email}</span>
         <span className="ml-2"><PlanBadge plan={currentPlan} size="small" /></span>
         <div className="flex-1" />
+        <button onClick={() => useLLMSettingsStore.getState().openSettings()} className="text-slate-500 hover:text-slate-300 mr-3 flex items-center gap-1">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          AI Model
+        </button>
         <button onClick={() => navigate('/pricing')} className="text-slate-500 hover:text-slate-300 mr-3">Pricing</button>
         <button onClick={() => navigate('/billing')} className="text-slate-500 hover:text-slate-300 mr-3">Billing</button>
         <button onClick={() => navigate('/instructions')} className="text-slate-500 hover:text-slate-300 mr-3">Instructions</button>
         <button onClick={() => { signOut(); navigate('/') }} className="text-slate-500 hover:text-status-warn">Sign Out</button>
       </div>
+
+      {/* Email verification notice */}
+      {user && !user.emailVerified && user.providerData[0]?.providerId === 'password' && (
+        <div className="bg-canvas-accent/10 text-canvas-accent text-xs px-4 py-1.5 flex items-center gap-2 shrink-0 border-b border-canvas-accent/20">
+          <span>Please verify your email address.</span>
+          <button onClick={() => { import('firebase/auth').then(m => m.sendEmailVerification(user)) }} className="underline hover:no-underline">Resend</button>
+        </div>
+      )}
 
       {/* Compatibility warning */}
       {editingBlocked && (

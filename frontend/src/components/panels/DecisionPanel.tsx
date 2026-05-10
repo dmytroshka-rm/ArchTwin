@@ -556,7 +556,12 @@ function ActionsSection({ layerId, editingBlocked, simulationResult, hasMultiple
           Simulate this component
         </ActionButton>
         <ActionButton
-          onClick={() => {/* TODO: open command palette with compare query */}}
+          onClick={() => {
+            // Select all layers for comparison and switch to Compare tab
+            const allLayerIds = Object.keys(useSandboxStore.getState().layers)
+            useSandboxStore.getState().setComparedLayers(allLayerIds)
+            window.dispatchEvent(new CustomEvent('archtwin:switch-panel', { detail: 'compare' }))
+          }}
           disabled={!hasMultipleLayers}
           disabledReason={!hasMultipleLayers ? 'Create a What-if layer first' : undefined}
         >

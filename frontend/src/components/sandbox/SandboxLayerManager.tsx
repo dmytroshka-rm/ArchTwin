@@ -3,12 +3,13 @@
  * Shows: baseline info, layer goal, simulation status indicators.
  */
 
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import clsx from 'clsx'
 import { useCanvasStore } from '@/store/canvasStore'
 import { useSandboxStore } from '@/store/sandboxStore'
 import { useSimulationStore } from '@/store/simulationStore'
 import { layerApi } from '@/api/endpoints'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 interface Props {
   compact?: boolean
@@ -16,8 +17,9 @@ interface Props {
 
 export function SandboxLayerManager({ compact = false }: Props) {
   const { activeLayerId, setActiveLayer } = useCanvasStore()
-  const { layers, baselineRef, comparedLayerIds, setComparedLayers, upsertLayer } = useSandboxStore()
+  const { layers, baselineRef, comparedLayerIds, setComparedLayers, upsertLayer, removeLayer } = useSandboxStore()
   const { activeJobId, jobs } = useSimulationStore()
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
   const layerList = Object.values(layers)
   const activeJob = activeJobId ? jobs[activeJobId] : null
@@ -123,6 +125,15 @@ export function SandboxLayerManager({ compact = false }: Props) {
             >
               {isCompared ? '✓' : '⇄'}
             </button>
+
+            {/* Delete layer (on hover) */}
+            <button
+              onClick={(e) => { e.stopPropagation(); setDeleteConfirm(layer.id) }}
+              className="text-[10px] px-1 rounded shrink-0 text-slate-600 opacity-0 group-hover:opacity-100 hover:text-status-fail transition-all"
+              title="Delete layer"
+            >
+              ✕
+            </button>
           </div>
         )
       })}
@@ -144,6 +155,24 @@ export function SandboxLayerManager({ compact = false }: Props) {
           </span>
         </div>
       )}
+
+      {/* Delete layer confirmation */}
+      <ConfirmDialog
+        open={!!deleteConfirm}
+        title="Delete layer?"
+        message={`This will permanently remove "${layerList.find((l) => l.proposal.id === deleteConfirm)?.proposal.title ?? 'this layer'}" and all its components and relations.`}
+        onConfirm={() => {
+          if (deleteConfirm) {
+            removeLayer(deleteConfirm)
+            if (activeLayerId === deleteConfirm) {
+              const remaining = Object.keys(layers).filter((id) => id !== deleteConfirm)
+              setActiveLayer(remaining[0] ?? null)
+            }
+          }
+          setDeleteConfirm(null)
+        }}
+        onCancel={() => setDeleteConfirm(null)}
+      />
     </div>
   )
 }

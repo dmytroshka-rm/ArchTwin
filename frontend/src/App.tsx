@@ -7,6 +7,7 @@ import { CanvasPage } from '@/pages/CanvasPage'
 import { PricingPage } from '@/pages/PricingPage'
 import { BillingPage } from '@/pages/BillingPage'
 import { UpgradeModal } from '@/components/billing/UpgradeModal'
+import { LLMSettingsModal } from '@/components/settings/LLMSettingsModal'
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <UpgradeModal />
+      <LLMSettingsModal />
     </>
   )
 }

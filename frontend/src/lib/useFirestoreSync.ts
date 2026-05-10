@@ -3,7 +3,7 @@
  * Debounces writes so we don't spam Firestore on every drag.
  */
 
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { useAuth } from './useAuth'
 import { useSandboxStore } from '@/store/sandboxStore'
 import { useCanvasStore } from '@/store/canvasStore'
@@ -16,6 +16,26 @@ import {
   type FullProjectData,
 } from './firestore'
 import type { ArchComponent } from '@/generated/isa.types'
+
+// ── localStorage fallback ─────────────────────────────────────────────────────
+
+const LOCAL_STORAGE_KEY = 'archtwin-project-data'
+
+function saveToLocalStorage(data: FullProjectData) {
+  try {
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data))
+  } catch { /* quota exceeded — ignore */ }
+}
+
+function loadFromLocalStorage(): FullProjectData | null {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as FullProjectData
+  } catch {
+    return null
+  }
+}
 
 const DEFAULT_PROJECT_ID = 'default'
 const SAVE_DEBOUNCE_MS = 2000
@@ -30,53 +50,82 @@ export function useFirestoreSync() {
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedRef = useRef(false)
+  const [firestoreReady, setFirestoreReady] = useState(false)
   const uid = user?.uid
 
-  // ── Load from Firestore on login ────────────────────────────────────────
+  // ── Restore project data from a FullProjectData object ───────────────────
+
+  const restoreData = useCallback((data: FullProjectData) => {
+    setBaselineRef(data.baseline_ref)
+
+    for (const layer of data.layers) {
+      upsertLayer(layer)
+      if (data.components[layer.id]) {
+        setLayerComponents(layer.id, data.components[layer.id])
+      }
+      if (data.relations[layer.id]) {
+        setLayerRelations(layer.id, data.relations[layer.id])
+      }
+    }
+
+    for (const [nodeId, pos] of Object.entries(data.positions)) {
+      setNodeLayout(nodeId, { x: pos.x, y: pos.y })
+    }
+
+    if (data.layers.length > 0) {
+      setActiveLayer(data.layers[0].id)
+    }
+  }, [setBaselineRef, upsertLayer, setLayerComponents, setLayerRelations, setNodeLayout, setActiveLayer])
+
+  // ── Load from Firestore on login (with localStorage fallback) ──────────
 
   useEffect(() => {
-    if (!uid || loadedRef.current) return
+    if (!uid) {
+      // No user — try localStorage anyway
+      const local = loadFromLocalStorage()
+      if (local && local.layers.length > 0) {
+        restoreData(local)
+      }
+      loadedRef.current = true
+      setFirestoreReady(true)
+      return
+    }
+    if (loadedRef.current) return
 
     loadFullProject(uid, DEFAULT_PROJECT_ID).then((data) => {
       if (!data || data.layers.length === 0) {
+        // Firestore empty — try localStorage
+        const local = loadFromLocalStorage()
+        if (local && local.layers.length > 0) {
+          restoreData(local)
+        }
         loadedRef.current = true
+        setFirestoreReady(true)
         return
       }
 
-      // Restore state
-      setBaselineRef(data.baseline_ref)
-
-      for (const layer of data.layers) {
-        upsertLayer(layer)
-        if (data.components[layer.id]) {
-          setLayerComponents(layer.id, data.components[layer.id])
-        }
-        if (data.relations[layer.id]) {
-          setLayerRelations(layer.id, data.relations[layer.id])
-        }
-      }
-
-      // Restore positions
-      for (const [nodeId, pos] of Object.entries(data.positions)) {
-        setNodeLayout(nodeId, { x: pos.x, y: pos.y })
-      }
-
-      // Activate first layer
-      if (data.layers.length > 0) {
-        setActiveLayer(data.layers[0].id)
-      }
+      restoreData(data)
+      // Also save to localStorage as backup
+      saveToLocalStorage(data)
 
       loadedRef.current = true
+      setFirestoreReady(true)
     }).catch((err) => {
       console.warn('Firestore load failed:', err)
+      // Fallback to localStorage
+      const local = loadFromLocalStorage()
+      if (local && local.layers.length > 0) {
+        restoreData(local)
+      }
       loadedRef.current = true
+      setFirestoreReady(true)
     })
-  }, [uid, setBaselineRef, upsertLayer, setLayerComponents, setLayerRelations, setNodeLayout, setActiveLayer])
+  }, [uid, restoreData])
 
   // ── Auto-save (debounced) ───────────────────────────────────────────────
 
   const triggerSave = useCallback(() => {
-    if (!uid || !loadedRef.current) return
+    if (!loadedRef.current) return
 
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current)
@@ -110,15 +159,21 @@ export function useFirestoreSync() {
         positions,
       }
 
-      saveFullProject(uid, DEFAULT_PROJECT_ID, data).catch((err) => {
-        console.warn('Firestore save failed:', err)
-      })
+      // Always save to localStorage (instant, reliable)
+      saveToLocalStorage(data)
+
+      // Also save to Firestore if user is logged in
+      if (uid) {
+        saveFullProject(uid, DEFAULT_PROJECT_ID, data).catch((err) => {
+          console.warn('Firestore save failed:', err)
+        })
+      }
     }, SAVE_DEBOUNCE_MS)
   }, [uid])
 
   // Watch store changes and trigger save
   useEffect(() => {
-    if (!uid || !loadedRef.current) return
+    if (!loadedRef.current) return
 
     const unsubSandbox = useSandboxStore.subscribe(() => triggerSave())
     const unsubCanvas = useCanvasStore.subscribe(() => triggerSave())
@@ -128,7 +183,7 @@ export function useFirestoreSync() {
       unsubCanvas()
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     }
-  }, [uid, triggerSave])
+  }, [triggerSave])
 
   // ── Individual delete sync ──────────────────────────────────────────────
 
@@ -147,5 +202,6 @@ export function useFirestoreSync() {
     deleteComponentFromFirestore,
     deleteRelationFromFirestore,
     isLoaded: loadedRef.current,
+    firestoreReady,
   }
 }

@@ -146,17 +146,43 @@ export interface PrioritizedActions {
 
 // ── AI Commands ───────────────────────────────────────────────────────────
 
+export interface AICanvasAction {
+  op: 'add_component' | 'remove_component' | 'update_component' | 'add_relation' | 'remove_relation'
+  name?: string
+  type?: string
+  technology?: string
+  tier?: string
+  source?: string
+  target?: string
+  protocol?: string
+  changes?: Record<string, unknown>
+  observed_metrics?: {
+    p99_latency_ms?: number
+    requests_per_second?: number
+    error_rate?: number
+    monthly_cost_usd?: number
+    cache_hit_ratio?: number
+    last_updated?: string
+  }
+  data_classification?: string
+}
+
 export interface AICommandResult {
   action: string
   type: string
   message: string
   result?: Record<string, unknown>
   suggestions?: string[]
+  canvas_actions?: AICanvasAction[]
 }
 
 export const aiApi = {
-  command: (command: string, context?: Record<string, unknown>) =>
-    api.post<AICommandResult>('/ai/command', { command, context: context ?? {} }),
+  command: (command: string, context?: Record<string, unknown>, llmConfig?: { api_key: string; provider: string; model: string }) =>
+    api.post<AICommandResult>('/ai/command', {
+      command,
+      context: context ?? {},
+      ...(llmConfig?.api_key ? llmConfig : {}),
+    }),
 }
 
 // ── Checkpoints ───────────────────────────────────────────────────────────

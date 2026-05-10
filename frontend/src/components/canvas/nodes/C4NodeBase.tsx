@@ -10,9 +10,11 @@
  *   - Baseline stable: muted, calm border
  */
 
-import { memo } from 'react'
+import { memo, useState, useCallback, useRef, useEffect } from 'react'
 import { Handle, Position } from '@xyflow/react'
 import clsx from 'clsx'
+import { useSandboxStore } from '@/store/sandboxStore'
+import { useCanvasStore } from '@/store/canvasStore'
 import type { ArchComponent } from '@/generated/isa.types'
 
 export type C4NodeData = ArchComponent & {
@@ -50,6 +52,39 @@ export const C4NodeBase = memo(function C4NodeBase({ data, selected }: NodeProps
   const isAuxiliary = tier === 'auxiliary'
   const icon = TYPE_ICON[data.type] ?? '◆'
 
+  // View mode annotation data (injected by C4GraphRenderer)
+  const viewMode = (data._viewMode as string | undefined) ?? null
+  const ann = data._annotation as { cost: { label: string; level: string }; security: { risk: string; external_facing: boolean; has_pii: boolean; crosses_boundary: boolean }; blast_radius: { downstream_count: number; weight: number } } | undefined
+
+  const [editing, setEditing] = useState(false)
+  const [editValue, setEditValue] = useState(data.name)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select()
+    }
+  }, [editing])
+
+  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (data.editingBlocked) return
+    setEditValue(data.name)
+    setEditing(true)
+  }, [data.name, data.editingBlocked])
+
+  const commitRename = useCallback(() => {
+    setEditing(false)
+    const trimmed = editValue.trim()
+    if (trimmed && trimmed !== data.name) {
+      const activeLayerId = useCanvasStore.getState().activeLayerId
+      if (activeLayerId) {
+        useSandboxStore.getState().upsertComponent(activeLayerId, { ...data, name: trimmed } as ArchComponent)
+      }
+    }
+  }, [editValue, data])
+
   // Determine border style based on state (priority order)
   const borderClass =
     data.isBlocked
@@ -67,7 +102,7 @@ export const C4NodeBase = memo(function C4NodeBase({ data, selected }: NodeProps
   return (
     <div
       className={clsx(
-        'relative rounded-lg border bg-canvas-surface transition-all',
+        'group relative rounded-lg border bg-canvas-surface transition-all',
         isTier1 ? 'min-w-[180px] max-w-[240px] px-3.5 py-2.5' : 'min-w-[150px] max-w-[200px] px-3 py-2',
         borderClass,
         // Selection = blue/violet ring (NEVER red)
@@ -78,11 +113,11 @@ export const C4NodeBase = memo(function C4NodeBase({ data, selected }: NodeProps
         data.editingBlocked && 'opacity-50 cursor-not-allowed',
       )}
     >
-      {/* Handles */}
-      <Handle type="target" position={Position.Top}    className="!bg-slate-500 !border-slate-600 !w-2 !h-2" />
-      <Handle type="source" position={Position.Bottom} className="!bg-slate-500 !border-slate-600 !w-2 !h-2" />
-      <Handle type="target" position={Position.Left}   className="!bg-slate-500 !border-slate-600 !w-2 !h-2" />
-      <Handle type="source" position={Position.Right}  className="!bg-slate-500 !border-slate-600 !w-2 !h-2" />
+      {/* Handles — larger hit area, visible on hover */}
+      <Handle type="target" position={Position.Top} className="!bg-canvas-accent/60 !border-canvas-accent !w-3 !h-3 !-top-1.5 opacity-0 group-hover:opacity-100 hover:!bg-canvas-accent hover:!scale-125 transition-all" />
+      <Handle type="source" position={Position.Bottom} className="!bg-canvas-accent/60 !border-canvas-accent !w-3 !h-3 !-bottom-1.5 opacity-0 group-hover:opacity-100 hover:!bg-canvas-accent hover:!scale-125 transition-all" />
+      <Handle type="target" position={Position.Left} className="!bg-canvas-accent/60 !border-canvas-accent !w-3 !h-3 !-left-1.5 opacity-0 group-hover:opacity-100 hover:!bg-canvas-accent hover:!scale-125 transition-all" />
+      <Handle type="source" position={Position.Right} className="!bg-canvas-accent/60 !border-canvas-accent !w-3 !h-3 !-right-1.5 opacity-0 group-hover:opacity-100 hover:!bg-canvas-accent hover:!scale-125 transition-all" />
 
       {/* Header row: icon + type + tier badge */}
       <div className="flex items-center gap-1.5 mb-1">
@@ -98,16 +133,28 @@ export const C4NodeBase = memo(function C4NodeBase({ data, selected }: NodeProps
         )}
       </div>
 
-      {/* Name */}
-      <div
-        className={clsx(
-          'leading-tight truncate',
-          isTier1 ? 'text-sm font-bold text-slate-100' : 'text-xs font-semibold text-slate-200',
-        )}
-        title={data.name}
-      >
-        {data.name}
-      </div>
+      {/* Name (double-click to rename) */}
+      {editing ? (
+        <input
+          ref={inputRef}
+          className="w-full bg-canvas-bg border border-canvas-accent rounded px-1 py-0.5 text-xs text-slate-200 outline-none"
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={commitRename}
+          onKeyDown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setEditing(false) }}
+        />
+      ) : (
+        <div
+          className={clsx(
+            'leading-tight truncate cursor-text',
+            isTier1 ? 'text-sm font-bold text-slate-100' : 'text-xs font-semibold text-slate-200',
+          )}
+          title={`${data.name} (double-click to rename)`}
+          onDoubleClick={handleDoubleClick}
+        >
+          {data.name}
+        </div>
+      )}
 
       {/* Technology */}
       {data.technology && (
@@ -116,8 +163,41 @@ export const C4NodeBase = memo(function C4NodeBase({ data, selected }: NodeProps
         </div>
       )}
 
-      {/* Blast radius indicator */}
-      {data.isBlastImpacted && data.impactScore !== undefined && (
+      {/* ── View Mode Annotations ────────────────────────────────────── */}
+      {viewMode === 'cost' && ann && (
+        <div className={clsx(
+          'mt-1.5 text-[10px] font-mono px-1.5 py-0.5 rounded border',
+          ann.cost.level === 'high' ? 'text-status-fail bg-status-fail/10 border-status-fail/30' :
+          ann.cost.level === 'medium' ? 'text-status-warn bg-status-warn/10 border-status-warn/30' :
+          'text-status-pass bg-status-pass/10 border-status-pass/30',
+        )}>
+          {ann.cost.label}
+        </div>
+      )}
+
+      {viewMode === 'security' && ann && (
+        <div className={clsx(
+          'mt-1.5 text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded border',
+          ann.security.risk === 'high' ? 'text-status-fail bg-status-fail/10 border-status-fail/30' :
+          ann.security.risk === 'medium' ? 'text-status-warn bg-status-warn/10 border-status-warn/30' :
+          'text-status-pass bg-status-pass/10 border-status-pass/30',
+        )}>
+          {ann.security.risk} risk
+          {ann.security.external_facing && ' · external'}
+          {ann.security.has_pii && ' · PII'}
+          {ann.security.crosses_boundary && ' · boundary'}
+        </div>
+      )}
+
+      {viewMode === 'blast' && ann && ann.blast_radius.weight > 0 && (
+        <div className="mt-1.5 flex items-center gap-1 text-[10px] text-amber-400 font-mono">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+          impact {ann.blast_radius.weight.toFixed(1)} · {ann.blast_radius.downstream_count} downstream
+        </div>
+      )}
+
+      {/* Blast radius indicator (from simulation) */}
+      {!viewMode && data.isBlastImpacted && data.impactScore !== undefined && (
         <div className="mt-1.5 flex items-center gap-1 text-[10px] text-amber-400 font-mono">
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
           impact {(data.impactScore as number).toFixed(2)}

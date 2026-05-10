@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import { useEffect, useCallback } from 'react'
 import { useBillingStore } from '@/store/billingStore'
 import { billingApi } from '@/api/endpoints'
+import { GitIntegration } from '@/components/settings/GitIntegration'
 
 export function BillingPage() {
   const {
@@ -148,6 +149,11 @@ export function BillingPage() {
               <BoolEntitlement label="Audit Logs" enabled={entitlements.can_use_audit_logs} />
             </div>
           </div>
+        </section>
+
+        {/* ── Git Integration ──────────────────────────────────────────── */}
+        <section className="mb-8">
+          <GitIntegration />
         </section>
 
         {/* ── Upgrade CTA ─────────────────────────────────────────────── */}

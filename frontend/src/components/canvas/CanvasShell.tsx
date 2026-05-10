@@ -14,10 +14,13 @@ import { ComponentPalette } from './ComponentPalette'
 import { C4GraphRenderer } from './C4GraphRenderer'
 import { ImportYamlModal } from './ImportYamlModal'
 import { CommandPalette } from './CommandPalette'
+import { AIChatPanel } from '@/components/ai/AIChatPanel'
 import { DecisionPanel } from '@/components/panels/DecisionPanel'
+import { DesignInspectorPanel } from '@/components/panels/DesignInspectorPanel'
 import { SimulationInsights } from '@/components/panels/SimulationInsights'
 import { SandboxLayerManager } from '@/components/sandbox/SandboxLayerManager'
 import { CommentsLayer } from '@/components/collaboration/CommentsLayer'
+import { ComparePanel } from '@/components/panels/ComparePanel'
 import { layerApi } from '@/api/endpoints'
 import { useSimulation } from '@/hooks/useSimulation'
 import clsx from 'clsx'
@@ -31,6 +34,13 @@ const VIEW_MODE_LABELS: Record<ViewMode, string> = {
   blast:    'Blast Radius',
 }
 
+const VIEW_MODE_DESCRIPTIONS: Record<ViewMode, string> = {
+  topology: 'Structural view — shows components and their dependencies',
+  cost:     'Shows estimated monthly cost per component. Identify expensive services and optimize spend.',
+  security: 'Highlights risk levels: external-facing, PII, trust boundary crossings.',
+  blast:    'Shows which components are affected if a selected service changes. Higher tier = bigger impact.',
+}
+
 interface Props {
   editingBlocked: boolean
 }
@@ -42,12 +52,20 @@ export function CanvasShell({ editingBlocked }: Props) {
 
   const [importOpen, setImportOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
-  const [rightPanel, setRightPanel] = useState<'decision' | 'comments'>('decision')
+  const [chatOpen, setChatOpen] = useState(false)
+  const [rightPanel, setRightPanel] = useState<'decision' | 'inspector' | 'compare' | 'comments'>('decision')
   const [viewMode, setViewMode] = useState<ViewMode>('topology')
 
   const hasResults = activeJob?.status === 'completed' && activeJob.result !== null
   const layerList = Object.values(layers)
   const selectedId = selectedNodeIds[0] ?? null
+
+  // Auto-switch to Inspector when a node is selected
+  useEffect(() => {
+    if (selectedId && rightPanel !== 'inspector') {
+      setRightPanel('inspector')
+    }
+  }, [selectedId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Resolve selected component name
   const selectedComponent = (() => {
@@ -61,11 +79,22 @@ export function CanvasShell({ editingBlocked }: Props) {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault()
-        setCommandOpen((v) => !v)
+        setChatOpen((v) => !v)
       }
     }
     window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
+
+    // Listen for panel switch events from child components
+    const panelHandler = (e: Event) => {
+      const panel = (e as CustomEvent).detail
+      if (panel) setRightPanel(panel)
+    }
+    window.addEventListener('archtwin:switch-panel', panelHandler)
+
+    return () => {
+      window.removeEventListener('keydown', handler)
+      window.removeEventListener('archtwin:switch-panel', panelHandler)
+    }
   }, [])
 
   // ── Run Simulation ─────────────────────────────────────────────────────
@@ -76,6 +105,17 @@ export function CanvasShell({ editingBlocked }: Props) {
       : activeLayerId ? [activeLayerId] : []
     if (layersToSim.length === 0) return
 
+    // Collect components and relations from all layers being simulated
+    const allComponents: Array<Record<string, unknown>> = []
+    const allRelations: Array<Record<string, unknown>> = []
+    for (const lid of layersToSim) {
+      const ld = layers[lid]
+      if (ld) {
+        allComponents.push(...ld.components.map((c) => ({ ...c })))
+        allRelations.push(...ld.relations.map((r) => ({ ...r })))
+      }
+    }
+
     await startSimulation({
       baseline_ref: baselineRef,
       proposal_refs: layersToSim,
@@ -83,8 +123,10 @@ export function CanvasShell({ editingBlocked }: Props) {
       reviewers: ['cost', 'performance', 'security'],
       include_blast_radius: true,
       include_calibration: true,
+      components: allComponents,
+      relations: allRelations,
     })
-  }, [baselineRef, comparedLayerIds, activeLayerId, startSimulation])
+  }, [baselineRef, comparedLayerIds, activeLayerId, layers, startSimulation])
 
   const handleAddLayer = useCallback(async () => {
     if (!baselineRef) return
@@ -150,6 +192,7 @@ export function CanvasShell({ editingBlocked }: Props) {
             <button
               key={mode}
               onClick={() => setViewMode(mode)}
+              title={VIEW_MODE_DESCRIPTIONS[mode]}
               className={clsx(
                 'text-[10px] px-2.5 py-1 rounded-md transition-all whitespace-nowrap',
                 viewMode === mode
@@ -165,7 +208,7 @@ export function CanvasShell({ editingBlocked }: Props) {
         {/* Centre: AI command input — wider, concrete placeholder */}
         <div className="flex-1 flex justify-center mx-2">
           <button
-            onClick={() => setCommandOpen(true)}
+            onClick={() => setChatOpen(true)}
             className="flex items-center gap-2 bg-canvas-bg border border-canvas-border rounded-lg px-4 py-1.5 w-full max-w-md hover:border-slate-500 transition-colors group"
           >
             <span className="text-canvas-accent/50 text-sm group-hover:text-canvas-accent/70">✦</span>
@@ -212,7 +255,7 @@ export function CanvasShell({ editingBlocked }: Props) {
         {/* Centre: Canvas */}
         <div className="flex-1 relative overflow-hidden">
           {activeLayerId ? (
-            <C4GraphRenderer layerId={activeLayerId} editingBlocked={editingBlocked} />
+            <C4GraphRenderer key={activeLayerId} layerId={activeLayerId} editingBlocked={editingBlocked} viewMode={viewMode} />
           ) : (
             <EmptyState onCreateLayer={handleAddLayer} onImport={() => setImportOpen(true)} />
           )}
@@ -224,16 +267,19 @@ export function CanvasShell({ editingBlocked }: Props) {
 
           {/* View mode active badge */}
           {viewMode !== 'topology' && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 bg-canvas-surface/90 backdrop-blur border border-canvas-accent/30 rounded-full px-4 py-1.5 flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-canvas-accent" />
-              <span className="text-[11px] text-canvas-accent font-medium">{VIEW_MODE_LABELS[viewMode]} Active</span>
-              <button onClick={() => setViewMode('topology')} className="text-[10px] text-slate-500 hover:text-slate-300 ml-1">✕</button>
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 bg-canvas-surface/90 backdrop-blur border border-canvas-accent/30 rounded-xl px-4 py-2 flex flex-col items-center gap-0.5">
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-canvas-accent" />
+                <span className="text-[11px] text-canvas-accent font-medium">{VIEW_MODE_LABELS[viewMode]} Active</span>
+                <button onClick={() => setViewMode('topology')} className="text-[10px] text-slate-500 hover:text-slate-300 ml-1">✕</button>
+              </div>
+              <span className="text-[10px] text-slate-500 max-w-[300px] text-center">{VIEW_MODE_DESCRIPTIONS[viewMode]}</span>
             </div>
           )}
         </div>
 
         {/* Right: Decision / Comments */}
-        <aside className="w-80 shrink-0 bg-canvas-surface border-l border-canvas-border flex flex-col overflow-hidden">
+        <aside className="w-80 shrink-0 bg-canvas-surface border-l border-canvas-border flex flex-col overflow-hidden transition-all duration-200">
           <div className="flex items-center border-b border-canvas-border shrink-0">
             <button
               onClick={() => setRightPanel('decision')}
@@ -243,6 +289,25 @@ export function CanvasShell({ editingBlocked }: Props) {
               )}
             >
               Decision
+            </button>
+            <button
+              onClick={() => setRightPanel('inspector')}
+              className={clsx(
+                'flex-1 text-[11px] py-2 text-center transition-colors',
+                rightPanel === 'inspector' ? 'text-canvas-accent border-b-2 border-canvas-accent' : 'text-slate-500 hover:text-slate-300',
+              )}
+            >
+              Inspector
+            </button>
+            <button
+              onClick={() => setRightPanel('compare')}
+              className={clsx(
+                'flex-1 text-[11px] py-2 text-center transition-colors',
+                rightPanel === 'compare' ? 'text-canvas-accent border-b-2 border-canvas-accent' : 'text-slate-500 hover:text-slate-300',
+                comparedLayerIds.length >= 2 && rightPanel !== 'compare' && 'text-purple-400',
+              )}
+            >
+              Compare{comparedLayerIds.length >= 2 ? ` (${comparedLayerIds.length})` : ''}
             </button>
             <button
               onClick={() => setRightPanel('comments')}
@@ -263,6 +328,15 @@ export function CanvasShell({ editingBlocked }: Props) {
                 onRunSimulation={handleRunSimulation}
               />
             )}
+            {rightPanel === 'inspector' && (
+              <DesignInspectorPanel
+                layerId={activeLayerId}
+                editingBlocked={editingBlocked}
+              />
+            )}
+            {rightPanel === 'compare' && (
+              <ComparePanel />
+            )}
             {rightPanel === 'comments' && activeLayerId && (
               <CommentsLayer layerId={activeLayerId} />
             )}
@@ -273,6 +347,7 @@ export function CanvasShell({ editingBlocked }: Props) {
       {/* Modals */}
       <ImportYamlModal open={importOpen} onClose={() => setImportOpen(false)} />
       <CommandPalette open={commandOpen} onClose={() => setCommandOpen(false)} />
+      <AIChatPanel open={chatOpen} onClose={() => setChatOpen(false)} />
     </div>
   )
 }

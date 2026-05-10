@@ -10,6 +10,7 @@ import {
   signInWithPopup,
   signOut as firebaseSignOut,
   updateProfile,
+  sendEmailVerification,
   type User,
 } from 'firebase/auth'
 import { auth, googleProvider } from './firebase'
@@ -50,10 +51,18 @@ export function useAuth() {
     try {
       const cred = await createUserWithEmailAndPassword(auth, email, password)
       await updateProfile(cred.user, { displayName })
+      // Send email verification
+      await sendEmailVerification(cred.user).catch(() => { /* non-blocking */ })
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Sign up failed'
       setState((s) => ({ ...s, error: msg, loading: false }))
       throw e
+    }
+  }, [])
+
+  const resendVerification = useCallback(async () => {
+    if (auth.currentUser && !auth.currentUser.emailVerified) {
+      await sendEmailVerification(auth.currentUser)
     }
   }, [])
 
@@ -80,5 +89,7 @@ export function useAuth() {
     signUp,
     signInWithGoogle,
     signOut,
+    resendVerification,
+    isEmailVerified: state.user?.emailVerified ?? false,
   }
 }
