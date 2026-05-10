@@ -1374,7 +1374,10 @@ async def _call_llm(command: str, context: dict, api_key: str, provider: str, mo
 
     try:
         if provider == "anthropic":
-            import anthropic
+            try:
+                import anthropic
+            except ImportError:
+                return {"action": "error", "type": "error", "message": "Anthropic SDK not installed on server. Install: pip install anthropic", "suggestions": []}
             client = anthropic.Anthropic(api_key=api_key)
             response = await asyncio.to_thread(
                 client.messages.create,
@@ -1385,9 +1388,19 @@ async def _call_llm(command: str, context: dict, api_key: str, provider: str, mo
             )
             text = response.content[0].text
 
-        elif provider == "openai":
-            import openai
-            client = openai.OpenAI(api_key=api_key)
+        elif provider in ("openai", "groq", "openrouter"):
+            try:
+                import openai
+            except ImportError:
+                return {"action": "error", "type": "error", "message": f"OpenAI SDK not installed on server (needed for {provider}). Install: pip install openai", "suggestions": []}
+
+            base_urls = {
+                "openai": None,
+                "groq": "https://api.groq.com/openai/v1",
+                "openrouter": "https://openrouter.ai/api/v1",
+            }
+            base_url = base_urls.get(provider)
+            client = openai.OpenAI(api_key=api_key, **({"base_url": base_url} if base_url else {}))
             response = await asyncio.to_thread(
                 client.chat.completions.create,
                 model=model,
@@ -1400,7 +1413,10 @@ async def _call_llm(command: str, context: dict, api_key: str, provider: str, mo
             text = response.choices[0].message.content or ""
 
         elif provider == "google":
-            import google.generativeai as genai
+            try:
+                import google.generativeai as genai
+            except ImportError:
+                return {"action": "error", "type": "error", "message": "Google AI SDK not installed on server. Install: pip install google-generativeai", "suggestions": []}
             genai.configure(api_key=api_key)
             gmodel = genai.GenerativeModel(model)
             response = await asyncio.to_thread(
@@ -1408,34 +1424,6 @@ async def _call_llm(command: str, context: dict, api_key: str, provider: str, mo
                 f"{AI_SYSTEM_PROMPT}\n\n{user_msg}",
             )
             text = response.text
-
-        elif provider == "groq":
-            import openai as groq_openai
-            client = groq_openai.OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
-            response = await asyncio.to_thread(
-                client.chat.completions.create,
-                model=model,
-                max_tokens=4096,
-                messages=[
-                    {"role": "system", "content": AI_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-            )
-            text = response.choices[0].message.content or ""
-
-        elif provider == "openrouter":
-            import openai as or_openai
-            client = or_openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-            response = await asyncio.to_thread(
-                client.chat.completions.create,
-                model=model,
-                max_tokens=4096,
-                messages=[
-                    {"role": "system", "content": AI_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-            )
-            text = response.choices[0].message.content or ""
 
         else:
             return {"action": "error", "type": "error", "message": f"Unsupported provider: {provider}"}
